@@ -117,6 +117,7 @@ loop.set_debug(False)
 queue = asyncio.Queue(maxsize=0, loop=loop)
 peak_stream = None
 
+
 async def connection_handler(connection, path):
     global master_connection, instrument_description, averaged_measurements_buffer_for_OSM
 
@@ -1034,7 +1035,8 @@ async def save_spectrum():
 async def heart_rate():
     heart_rate_timeout_sec = 10
     delimiter = ' '
-    # await asyncio.sleep(heart_rate_timeout_sec)
+
+    await asyncio.sleep(heart_rate_timeout_sec)
 
     try:
         out_str = f'heart_rate_order: connection {delimiter.join([str(x) for x in coroutine_heart_rate.keys()])}' + delimiter
@@ -1132,7 +1134,7 @@ if __name__ == "__main__":
 
     # если есть задание на диске, то загрузим его и начнем работать до получения нового задания
     if Path(instrument_description_filename).is_file():
-        # file exists
+        # instrument description file exists
         logging.info('Found instrument description file')
         try:
             with open(instrument_description_filename, 'r') as f:
