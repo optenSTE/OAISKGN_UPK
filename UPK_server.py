@@ -5,6 +5,7 @@ import asyncio
 import json
 import hyperion
 import datetime
+import time
 from scipy.signal import find_peaks
 import numpy as np
 import pandas as pd
@@ -18,7 +19,7 @@ hostname = socket.gethostname()
 # address, port = socket.gethostbyname(hostname), 7681  # адрес websocket-сервера
 index_of_reflection = 1.4682
 speed_of_light = 299792458.0
-program_version = '20201201' 
+program_version = '20201201'
 output_measurements_order2 = ['T_degC', 'Fav_N', 'Fbend_N', 'Ice_mm']  # последовательность выдачи данных
 DEFAULT_TIMEOUT = 10000
 instrument_description_filename = 'instrument_description.json'
@@ -1139,6 +1140,39 @@ if __name__ == "__main__":
             logging.debug(f'Some error during instrument decsription file reading; exception: {e.__doc__}')
         else:
             logging.info('Loaded instrument description ' + json.dumps(instrument_description))
+
+        instrument_ip = instrument_description['IP_address']
+
+        # проверка готовности прибора (должен отвечать порт, по которому идут команды)
+        with socket.socket() as s:
+            s.settimeout(1)
+            instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
+            try:
+                s.connect(instrument_address)  # подключаемся к порту команд
+            except socket.error:
+                return_error('command port is not active on ip ' + instrument_ip)
+                pass
+        logging.info("Hyperion command port test passed")
+
+        # перегружаем прибор и ждем его загрузки
+        logging.info("Hyperion reboot")
+        hyperion.Hyperion(instrument_ip).reboot()
+
+        # ожижание перезагрузки
+        x55_reboot_time_sec = 35  # время, необходимое для перезагрузки прибора
+        time.sleep(x55_reboot_time_sec)
+
+        # проверка готовности прибора (должен отвечать порт, по которому идут команды)
+        with socket.socket() as s:
+            s.settimeout(x55_reboot_time_sec)
+            instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
+            try:
+                s.connect(instrument_address)  # подключаемся к порту команд
+            except socket.error:
+                return_error('Hyperion command port is not active on ip ' + instrument_ip)
+                pass
+        logging.info("Hyperion command port test passed after rebooting")
+
         loop.create_task(instrument_init())
 
     loop.run_forever()
