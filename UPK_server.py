@@ -171,10 +171,18 @@ async def connection_handler(connection, path):
             json_msg.clear()
             return
 
-        # сохраненеи задания на диск для последующей работы без соединения
-        if 1:
-            with open(instrument_description_filename, 'w+') as f:
-                json.dump(json_msg, f, ensure_ascii=False, indent=4)
+        # если на диске уже есть задание, то сохраним его под другим именем
+        if Path(instrument_description_filename).is_file():
+            # file exists
+            try:
+                new_instrument_description_filename = os.path.splitext(instrument_description_filename)[0] + datetime.datetime.now().strftime('_before_%Y%m%d%H%M%S') + os.path.splitext(instrument_description_filename)[1]
+                os.rename(instrument_description_filename, new_instrument_description_filename)
+            finally:
+                pass
+
+        # сохранение нового задания на диск для последующей работы без соединения
+        with open(instrument_description_filename, 'w+') as file:
+            json.dump(json_msg, file, ensure_ascii=False, indent=4)
 
         # если поступившее задание отличается от имеющегося ранее, то нужно очистить накопленный буфер
         # if json.dumps(instrument_description) != json.dumps(json_msg) and len(averaged_measurements_buffer_for_OSM['data']) > 0:
