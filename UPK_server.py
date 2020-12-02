@@ -1144,37 +1144,45 @@ if __name__ == "__main__":
         else:
             logging.info('Loaded instrument description ' + json.dumps(instrument_description))
 
-        instrument_ip = instrument_description['IP_address']
+        initial_reboot = False
+        if initial_reboot:
+            instrument_ip = instrument_description['IP_address']
 
-        # проверка готовности прибора (должен отвечать порт, по которому идут команды)
-        with socket.socket() as s:
-            s.settimeout(1)
-            instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
-            try:
-                s.connect(instrument_address)  # подключаемся к порту команд
-            except socket.error:
-                return_error('command port is not active on ip ' + instrument_ip)
-                pass
-        logging.info("Hyperion command port test passed")
+            # проверка готовности прибора (должен отвечать порт, по которому идут команды)
+            with socket.socket() as s:
+                s.settimeout(1)
+                instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
+                try:
+                    s.connect(instrument_address)  # подключаемся к порту команд
+                except socket.error:
+                    return_error('command port is not active on ip ' + instrument_ip)
+                    pass
+            logging.info("Hyperion command port test passed")
 
-        # перегружаем прибор и ждем его загрузки
-        logging.info("Hyperion reboot")
-        hyperion.Hyperion(instrument_ip).reboot()
+            # перегружаем прибор и ждем его загрузки
+            logging.info("Hyperion reboot")
+            x55 = hyperion.Hyperion(instrument_ip)
+            x55.reboot()
 
-        # ожижание перезагрузки
-        x55_reboot_time_sec = 35  # время, необходимое для перезагрузки прибора
-        time.sleep(x55_reboot_time_sec)
+            # ожижание перезагрузки
+            x55_reboot_time_sec = 35  # время, необходимое для перезагрузки прибора
+            time.sleep(x55_reboot_time_sec)
 
-        # проверка готовности прибора (должен отвечать порт, по которому идут команды)
-        with socket.socket() as s:
-            s.settimeout(x55_reboot_time_sec)
-            instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
-            try:
-                s.connect(instrument_address)  # подключаемся к порту команд
-            except socket.error:
-                return_error('Hyperion command port is not active on ip ' + instrument_ip)
-                pass
-        logging.info("Hyperion command port test passed after rebooting")
+            # проверка готовности прибора (должен отвечать порт, по которому идут команды)
+            with socket.socket() as s:
+                s.settimeout(x55_reboot_time_sec)
+                instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
+                try:
+                    s.connect(instrument_address)  # подключаемся к порту команд
+                except socket.error:
+                    return_error('Hyperion command port is not active on ip ' + instrument_ip)
+                    pass
+            logging.info("Hyperion command port test passed after rebooting")
+
+            x56 = hyperion.Hyperion(instrument_ip)
+            print('serial_number', x56.serial_number)
+            print('laser_scan_speed', x56.laser_scan_speed)
+            pass
 
         loop.create_task(instrument_init())
 
