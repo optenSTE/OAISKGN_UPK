@@ -13,6 +13,7 @@ import sys
 import socket
 from pathlib import Path
 import statistics
+import os.path
 
 # Настроечные переменные
 hostname = socket.gethostname()
@@ -410,14 +411,6 @@ async def get_wls_from_x55_coroutine():
                     measurement_time = peak_data['timestamp']
 
                     # запись длин волн в буфер
-                    if 0:
-                        wls_buffer_for_saving['is_ready'] = False
-                        try:
-                            wls_buffer_for_saving['data'][measurement_time] = peaks_by_channel
-                        finally:
-                            wls_buffer_for_saving['is_ready'] = True
-
-                    # запись длин волн в буфер 2
                     if wls_buffer_for_disk['is_ready']:
                         wls_buffer_for_disk['is_ready'] = False
                         t = [measurement_time]
