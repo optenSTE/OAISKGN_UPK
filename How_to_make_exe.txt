@@ -1,0 +1,2 @@
+pip install pyinstaller
+pyinstaller UPK_server.spec
