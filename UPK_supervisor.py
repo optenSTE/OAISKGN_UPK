@@ -22,6 +22,9 @@ instrument_description_filename = 'instrument_description.json'  # имя фай
 ITO_rebooting_duration_sec = 40
 
 
+# Глобальные переменные
+ITO_reboot_next_time = False
+
 def get_dir_size_bytes():
     total_size = 0
     for file_name in glob.glob(files_template):
@@ -31,6 +34,8 @@ def get_dir_size_bytes():
 
 
 def actions_when_slow_data():
+    global ITO_reboot_next_time
+    
     try:
         logging.info(f'Stopping service {service_name}...')
         # stop the service
@@ -43,28 +48,44 @@ def actions_when_slow_data():
     except Exception as e:
         logging.error(f'An exception happened: {e.__doc__}')
 
-    try:
-        # проверка готовности прибора (должен отвечать порт, по которому идут команды)
-        with socket.socket() as s:
-            s.settimeout(1)
-            instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
-            try:
-                s.connect(instrument_address)  # подключаемся к порту команд
-            except socket.error:
-                logging.error(f'command port is not active {instrument_ip}:{hyperion.COMMAND_PORT}')
+    # проверка готовности прибора (должен отвечать порт, по которому идут команды)
+    with socket.socket() as s:
+        s.settimeout(1)
+        instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
+        try:
+            s.connect(instrument_address)  # подключаемся к порту команд
+        except socket.error:
+            logging.error(f'command port is not active {instrument_ip}:{hyperion.COMMAND_PORT}')
+        else:
+            logging.info(f"Hyperion command port test passed {instrument_ip}:{hyperion.COMMAND_PORT}")
+
+            if ITO_reboot_next_time:
+                ITO_reboot_next_time = False
+
+                try:
+                    h1 = hyperion.Hyperion(instrument_ip)
+                except Exception as e:
+                    logging.debug(f'Some error during ITO init - exception: {e.__doc__}')
+                else:
+
+                    try:
+                        utcnow = datetime.datetime.utcnow()
+                        logging.info(f'Set ITO time to {utcnow.strftime("%Y%m%d%H%M%S")}')
+                        h1.instrument_utc_date_time(utcnow)
+                    except Exception as e:
+                        logging.debug(f'Some error during h1.instrument_utc_date_time - exception: {e.__doc__}')
+    
+                    try:
+                        logging.info(f'Rebooting ITO...')
+                        h1.reboot()
+                    except Exception as e:
+                        logging.error(f'An exception happened: {e.__doc__}')
+    
+                    logging.info(f"Pause for {ITO_rebooting_duration_sec}sec")
+                    time.sleep(ITO_rebooting_duration_sec)
+                    logging.info(f"Instrument {h1.instrument_name}, ip {instrument_ip} rebooted")
             else:
-                logging.info(f"Hyperion command port test passed {instrument_ip}:{hyperion.COMMAND_PORT}")
-
-                logging.info(f'Rebooting ITO...')
-                h1 = hyperion.Hyperion(instrument_ip)
-                h1.reboot()
-
-                logging.info(f"Pause for {ITO_rebooting_duration_sec}sec")
-                time.sleep(ITO_rebooting_duration_sec)
-                logging.info(f"Instrument {h1.instrument_name}, ip {instrument_ip} rebooted")
-
-    except Exception as e:
-        logging.error(f'An exception happened: {e.__doc__}')
+                ITO_reboot_next_time = True
 
     try:
         # start the service
