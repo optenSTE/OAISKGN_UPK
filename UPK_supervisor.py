@@ -1,7 +1,6 @@
 """
 Скрипт проверяет появление данных в указанной папке
 Если скорость поступления данных ниже порога, то выполняется перезапуск службы
-
 """
 
 import datetime
@@ -19,11 +18,11 @@ import socket
 # Константы
 files_template = '*.txt'  # шаблон имени файла для подсчета размера папки
 instrument_description_filename = 'instrument_description.json'  # имя файла с описанием оборудования
-ITO_rebooting_duration_sec = 40
-
+ITO_rebooting_duration_sec = 10
 
 # Глобальные переменные
 ITO_reboot_next_time = False
+
 
 def get_dir_size_bytes():
     total_size = 0
@@ -35,7 +34,7 @@ def get_dir_size_bytes():
 
 def actions_when_slow_data():
     global ITO_reboot_next_time
-    
+
     try:
         logging.info(f'Stopping service {service_name}...')
         # stop the service
@@ -69,18 +68,23 @@ def actions_when_slow_data():
                 else:
 
                     try:
+                        logging.info(f'Current ITO time {h1.instrument_utc_date_time.strftime("%d.%m.%Y %H:%M:%S")}')
+
                         utcnow = datetime.datetime.utcnow()
-                        logging.info(f'Set ITO time to {utcnow.strftime("%Y%m%d%H%M%S")}')
-                        h1.instrument_utc_date_time(utcnow)
+                        logging.info(f'Setting ITO time to UPK-UTC {utcnow.strftime("%d.%m.%Y %H:%M:%S")}')
+                        h1.instrument_utc_date_time = utcnow
+
+                        logging.info(f'Current ITO time {h1.instrument_utc_date_time.strftime("%d.%m.%Y %H:%M:%S")}')
+
                     except Exception as e:
                         logging.debug(f'Some error during h1.instrument_utc_date_time - exception: {e.__doc__}')
-    
+
                     try:
                         logging.info(f'Rebooting ITO...')
                         h1.reboot()
                     except Exception as e:
                         logging.error(f'An exception happened: {e.__doc__}')
-    
+
                     logging.info(f"Pause for {ITO_rebooting_duration_sec}sec")
                     time.sleep(ITO_rebooting_duration_sec)
                     logging.info(f"Instrument {h1.instrument_name}, ip {instrument_ip} rebooted")
