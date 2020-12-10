@@ -14,11 +14,12 @@ import sys
 import json
 from pathlib import Path
 import socket
+import random
 
 # Константы
 files_template = '*.txt'  # шаблон имени файла для подсчета размера папки
 instrument_description_filename = 'instrument_description.json'  # имя файла с описанием оборудования
-ITO_rebooting_duration_sec = 10
+ITO_rebooting_duration_sec = 40
 
 # Глобальные переменные
 ITO_reboot_next_time = False
@@ -127,10 +128,17 @@ if __name__ == "__main__":
 
     dir_size_speed_threshold_mb_per_h = float(program_params[1])  # минимальная скорость прироста размера папки, при которой не будет перезапускаться служба
     service_name = program_params[2]  # имя службы для перезапуска
-    check_interval_sec = float(program_params[3])  # интервал проверки
+    dir_check_interval_sec = float(program_params[3])  # интервал проверки
     num_of_triggers_before_action = int(program_params[4])  # количество срабатываний триггера до реальных действий
 
-    last_check_time = 0
+    unconditional_reboot_interval_sec = 30*24*3600  # интервал безусловной перезагрузки службы (и прибора)
+
+    # случайная добавка к интервалу перезагрузки - чтобы не было в одно и то же время
+    unconditional_reboot_interval_sec += random.randint(-int(unconditional_reboot_interval_sec/8),
+                                                        int(unconditional_reboot_interval_sec/8))
+
+    last_dir_check_time = datetime.datetime.now().timestamp()
+    last_unconditional_reboot_time = datetime.datetime.now().timestamp()
     cur_time = 0
     cur_dir_size = 0
     last_dir_size = 0
@@ -151,17 +159,34 @@ if __name__ == "__main__":
 
             instrument_ip = instrument_description['IP_address']
         else:
-            logging.info(f'No file {instrument_description_filename}, pause for {check_interval_sec} sec..')
-            time.sleep(check_interval_sec)
+            logging.info(f'No file {instrument_description_filename}, pause for {dir_check_interval_sec} sec..')
+            time.sleep(dir_check_interval_sec)
 
-    print("cur_time\tlast_check_time\ttime_diff_sec\tdir_size_diff_byte\tcur_speed_mb_per_hour")
+    # print("cur_time\tlast_check_time\ttime_diff_sec\tdir_size_diff_byte\tcur_speed_mb_per_hour")
     while True:
+
+        # безуслованя перезагрузка по таймеру
+        if 1:
+            cur_time = datetime.datetime.now().timestamp()
+            if (cur_time - last_unconditional_reboot_time) >= unconditional_reboot_interval_sec:
+                logging.info('Time-trigger released')
+
+                last_unconditional_reboot_time = cur_time
+
+                # случайная добавка к интервалу перезагрузки - чтобы не было в одно и то же время
+                unconditional_reboot_interval_sec += random.randint(-int(unconditional_reboot_interval_sec / 8),
+                                                                    int(unconditional_reboot_interval_sec / 8))
+
+                ITO_reboot_next_time = True
+                # actions_when_slow_data()
+
+        # перезагрузка по скорости наполнения папки с данными
         try:
             cur_time = datetime.datetime.now().timestamp()
             cur_dir_size = get_dir_size_bytes()
-            if (last_check_time > 0) and (cur_time - last_check_time >= check_interval_sec):
+            if (cur_time - last_dir_check_time) >= dir_check_interval_sec:
 
-                time_diff_sec = cur_time - last_check_time
+                time_diff_sec = cur_time - last_dir_check_time
                 dir_size_diff_byte = cur_dir_size - last_dir_size
 
                 if time_diff_sec <= 0:
@@ -169,29 +194,30 @@ if __name__ == "__main__":
 
                 cur_speed_mb_per_h = 3600 / (1024 * 1024) * dir_size_diff_byte / time_diff_sec
 
-                print(cur_time, last_check_time, time_diff_sec, dir_size_diff_byte, cur_speed_mb_per_h, sep='\t')
+                # print(cur_time, last_dir_check_time, time_diff_sec, dir_size_diff_byte, cur_speed_mb_per_h, sep='\t')
 
                 if 0.0 <= cur_speed_mb_per_h < dir_size_speed_threshold_mb_per_h:
-                    print('Speed %.1fMb/h is too low' % cur_speed_mb_per_h)
+                    # print('Speed %.1fMb/h is too slow' % cur_speed_mb_per_h)
                     logging.info('Speed %.1fMb/h is too low' % cur_speed_mb_per_h)
 
                     cur_num_of_triggers += 1
                     if cur_num_of_triggers >= num_of_triggers_before_action:
-                        print('Action!')
+                        # print('Action!')
                         logging.info('Action!')
                         cur_num_of_triggers = 0
-                        actions_when_slow_data()
+
+                        # actions_when_slow_data()
                 else:
                     logging.info('Speed %.1fMb/h is ok' % cur_speed_mb_per_h)
 
-            sleeping_time = check_interval_sec - (cur_time - last_check_time)
-            if sleeping_time < 0 or sleeping_time > check_interval_sec:
-                sleeping_time = check_interval_sec
+            sleeping_time = dir_check_interval_sec - (cur_time - last_dir_check_time)
+            if sleeping_time < 0 or sleeping_time > dir_check_interval_sec:
+                sleeping_time = dir_check_interval_sec
             time.sleep(sleeping_time)
 
         except Exception as e:
             logging.error(f'An exception happened: {e.__doc__}')
 
         finally:
-            last_check_time = cur_time
+            last_dir_check_time = cur_time
             last_dir_size = cur_dir_size
