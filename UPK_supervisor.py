@@ -19,10 +19,8 @@ import random
 # Константы
 files_template = '*.txt'  # шаблон имени файла для подсчета размера папки
 instrument_description_filename = 'instrument_description.json'  # имя файла с описанием оборудования
-ITO_rebooting_duration_sec = 40
-
-# Глобальные переменные
-ITO_reboot_next_time = False
+ITO_rebooting_duration_sec = 40  # время перезагрузки прибора
+win_service_restart_pause = 10  # пауза при перезапуске службы
 
 
 def get_dir_size_bytes():
@@ -33,8 +31,7 @@ def get_dir_size_bytes():
     return total_size
 
 
-def actions_when_slow_data():
-    global ITO_reboot_next_time
+def action_when_trigger_released(ITO_reboot=False):
 
     try:
         logging.info(f'Stopping service {service_name}...')
@@ -43,8 +40,8 @@ def actions_when_slow_data():
         result1 = subprocess.run(args)
         logging.info(f'Stop service {service_name} return code {result1.returncode}')
 
-        logging.info(f"Pause for {ITO_rebooting_duration_sec}sec")
-        time.sleep(ITO_rebooting_duration_sec)
+        logging.info(f"Pause for {win_service_restart_pause}sec")
+        time.sleep(win_service_restart_pause)
     except Exception as e:
         logging.error(f'An exception happened: {e.__doc__}')
 
@@ -59,8 +56,7 @@ def actions_when_slow_data():
         else:
             logging.info(f"Hyperion command port test passed {instrument_ip}:{hyperion.COMMAND_PORT}")
 
-            if ITO_reboot_next_time:
-                ITO_reboot_next_time = False
+            if ITO_reboot:
 
                 try:
                     h1 = hyperion.Hyperion(instrument_ip)
@@ -89,8 +85,6 @@ def actions_when_slow_data():
                     logging.info(f"Pause for {ITO_rebooting_duration_sec}sec")
                     time.sleep(ITO_rebooting_duration_sec)
                     logging.info(f"Instrument {h1.instrument_name}, ip {instrument_ip} rebooted")
-            else:
-                ITO_reboot_next_time = True
 
     try:
         # start the service
@@ -99,8 +93,6 @@ def actions_when_slow_data():
         result2 = subprocess.run(args)
         logging.info(f'Start service {service_name} return code {result2.returncode}')
 
-        logging.info(f"Pause for {ITO_rebooting_duration_sec}sec")
-        time.sleep(ITO_rebooting_duration_sec)
     except Exception as e:
         logging.error(f'An exception happened: {e.__doc__}')
 
@@ -115,13 +107,13 @@ if __name__ == "__main__":
     program_params = None
     try:
         program_params = sys.argv
-        if len(program_params) != 5:
+        if len(program_params) != 6:
             raise NameError('Wrong program parameters')
     except Exception as e:
         message = 'Wrong program parameters\n' \
-                  'OAISKGN_UPK_supervisor <dir_size_speed_threshold_mb_per_h> <service_name> <check_interval_sec> <num_of_triggers_before_action>\n' \
+                  'OAISKGN_UPK_supervisor <dir_size_speed_threshold_mb_per_h> <service_name> <check_interval_sec> <num_of_triggers_before_action> <win_service_restart_interval_sec>\n' \
                   'Restart as shown below\n' \
-                  'OAISKGN_UPK_supervisor 1 OAISKGN_UPK 60 5'
+                  'OAISKGN_UPK_supervisor 1 OAISKGN_UPK 60 5 10800'
         print(message)
         logging.error(message)
         exit(0)
@@ -130,12 +122,11 @@ if __name__ == "__main__":
     service_name = program_params[2]  # имя службы для перезапуска
     dir_check_interval_sec = float(program_params[3])  # интервал проверки
     num_of_triggers_before_action = int(program_params[4])  # количество срабатываний триггера до реальных действий
-
-    unconditional_reboot_interval_sec = 30*24*3600  # интервал безусловной перезагрузки службы (и прибора)
+    win_service_restart_interval_sec = int(program_params[5])  # интервал безусловной перезагрузки службы
 
     # случайная добавка к интервалу перезагрузки - чтобы не было в одно и то же время
-    unconditional_reboot_interval_sec += random.randint(-int(unconditional_reboot_interval_sec/8),
-                                                        int(unconditional_reboot_interval_sec/8))
+    win_service_restart_interval_sec += random.randint(-int(win_service_restart_interval_sec / 8),
+                                                       int(win_service_restart_interval_sec / 8))
 
     last_dir_check_time = datetime.datetime.now().timestamp()
     last_unconditional_reboot_time = datetime.datetime.now().timestamp()
@@ -143,6 +134,8 @@ if __name__ == "__main__":
     cur_dir_size = 0
     last_dir_size = 0
     cur_num_of_triggers = 0
+
+    ITO_reboot_next_time = False
 
     logging.info('Looking for instrument description file...')
     instrument_ip = None
@@ -168,17 +161,16 @@ if __name__ == "__main__":
         # безуслованя перезагрузка по таймеру
         if 1:
             cur_time = datetime.datetime.now().timestamp()
-            if (cur_time - last_unconditional_reboot_time) >= unconditional_reboot_interval_sec:
+            if (cur_time - last_unconditional_reboot_time) >= win_service_restart_interval_sec > 0:
                 logging.info('Time-trigger released')
 
                 last_unconditional_reboot_time = cur_time
 
                 # случайная добавка к интервалу перезагрузки - чтобы не было в одно и то же время
-                unconditional_reboot_interval_sec += random.randint(-int(unconditional_reboot_interval_sec / 8),
-                                                                    int(unconditional_reboot_interval_sec / 8))
+                win_service_restart_interval_sec += random.randint(-int(win_service_restart_interval_sec / 8),
+                                                                   int(win_service_restart_interval_sec / 8))
 
-                ITO_reboot_next_time = True
-                # actions_when_slow_data()
+                action_when_trigger_released()
 
         # перезагрузка по скорости наполнения папки с данными
         try:
@@ -206,7 +198,8 @@ if __name__ == "__main__":
                         logging.info('Action!')
                         cur_num_of_triggers = 0
 
-                        # actions_when_slow_data()
+                        action_when_trigger_released(ITO_reboot_next_time)
+                        ITO_reboot_next_time = not ITO_reboot_next_time
                 else:
                     logging.info('Speed %.1fMb/h is ok' % cur_speed_mb_per_h)
 
