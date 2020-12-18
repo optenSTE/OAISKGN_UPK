@@ -169,9 +169,15 @@ async def connection_handler(connection, path):
             json_msg.clear()
             continue
 
-        if float(json_msg['version']) > 10.0:
-            # это управляющее сообщение
-            continue
+        try:
+            message_type = json_msg['type']
+            if message_type == "control":
+                # ToDo: сделать обработку управляющих сообщений
+                
+                continue
+        except KeyError:
+            # нет такого ключа - это задание
+            pass
 
         # сохраненеи задания на диск для последующей работы без соединения
         if 1:
