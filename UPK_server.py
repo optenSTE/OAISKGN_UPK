@@ -167,7 +167,11 @@ async def connection_handler(connection, path):
         except json.JSONDecodeError:
             logging.info('wrong JSON message has been refused')
             json_msg.clear()
-            return
+            continue
+
+        if float(json_msg['version']) > 10.0:
+            # это управляющее сообщение
+            continue
 
         # сохраненеи задания на диск для последующей работы без соединения
         if 1:
