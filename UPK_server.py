@@ -19,7 +19,7 @@ hostname = socket.gethostname()
 # address, port = socket.gethostbyname(hostname), 7681  # адрес websocket-сервера
 index_of_reflection = 1.4682
 speed_of_light = 299792458.0
-program_version = '20201221'
+program_version = '20201221(3)'
 output_measurements_order2 = ['T_degC', 'Fav_N', 'Fbend_N', 'Ice_mm']  # последовательность выдачи данных
 DEFAULT_TIMEOUT = 10000
 instrument_description_filename = 'instrument_description.json'
@@ -240,9 +240,14 @@ async def connection_handler(connection, path):
 
 
 async def instrument_init():
-    global instrument_description, devices, active_channels, x55_measurement_interval_sec, h1, data_averaging_interval_sec, measurements_buffer, peak_stream
+    global output_measurements_order2, instrument_description, devices, active_channels, x55_measurement_interval_sec, h1, data_averaging_interval_sec, measurements_buffer, peak_stream
 
     data_averaging_interval_sec = 1.0 / instrument_description['SampleRate']
+
+    if instrument_description['version'] == '0.1' or instrument_description['version'] == '0.2':
+        output_measurements_order2 = ['T_degC', 'Fav_N', 'Fbend_N', 'Ice_mm']  # последовательность выдачи данных
+    elif instrument_description['version'] == '0.3':
+        output_measurements_order2 = ['T_degC', 'Fav_N', 'Fbend_N', 'F1_N', 'F2_N']  # последовательность выдачи данных
 
     # вытаскиваем информацию об устройствах
     devices = list()
@@ -251,7 +256,7 @@ async def instrument_init():
         # ToDo перенести это в класс ODTiT
         device = None
         try:
-            if device_description['version'] == '0.1' or device_description['version'] == '0.2':
+            if device_description['version'] == '0.1' or device_description['version'] == '0.2' or device_description['version'] == '0.3':
                 device = ODTiT(device_description['x55_channel'])
                 device.id = device_description['ID']
                 device.name = device_description['Name']
@@ -301,7 +306,7 @@ async def instrument_init():
                 device.sensors[2].fg = device_description['Sensor3110_2']['FG']
                 device.sensors[2].ctet = device_description['Sensor3110_2']['CTET']
 
-            if device_description['version'] == '0.2':
+            if device_description['version'] == '0.2' or device_description['version'] == '0.3':
                 device.fmodel_f0 = device_description['Fmodel_F0']
                 device.fmodel_f1 = device_description['Fmodel_F1']
                 device.fmodel_f2 = device_description['Fmodel_F2']
@@ -675,19 +680,20 @@ async def averaging_measurements_coroutine():
                                 if 'Ice_mm' in field_name:
                                     ice = block_mean
 
-                        # расчет границ нормального тяжения - при котором виртуальный гололед не более 1мм
-                        # fok = f_extra(ice_threshold)
-                        ice_threshold = 1
-                        fok = 10 * (device.icemodel_i1 * ice_threshold + device.icemodel_i2 * (ice_threshold ** 2))
-                        fmodel_max = 10 * (
-                                device.fmodel_f2 * (t_max ** 2) + device.fmodel_f1 * t_max + device.fmodel_f0)
-                        fmodel_min = 10 * (
-                                device.fmodel_f2 * (t_min ** 2) + device.fmodel_f1 * t_min + device.fmodel_f0)
-                        fok_min = fmodel_min - fok
-                        fok_max = fmodel_max + fok
+                        if instrument_description['version'] == "0.1" or instrument_description['version'] == "0.2":
+                            # расчет границ нормального тяжения - при котором виртуальный гололед не более 1мм
+                            # fok = f_extra(ice_threshold)
+                            ice_threshold = 1
+                            fok = 10 * (device.icemodel_i1 * ice_threshold + device.icemodel_i2 * (ice_threshold ** 2))
+                            fmodel_max = 10 * (
+                                    device.fmodel_f2 * (t_max ** 2) + device.fmodel_f1 * t_max + device.fmodel_f0)
+                            fmodel_min = 10 * (
+                                    device.fmodel_f2 * (t_min ** 2) + device.fmodel_f1 * t_min + device.fmodel_f0)
+                            fok_min = fmodel_min - fok
+                            fok_max = fmodel_max + fok
 
-                        cur_measurements.append(fok_min)
-                        cur_measurements.append(fok_max)
+                            cur_measurements.append(fok_min)
+                            cur_measurements.append(fok_max)
 
                     # обработанные данные убираем из блока
                     measurements_buffer['data'] = measurements_buffer['data'].loc[
@@ -891,7 +897,8 @@ async def send_avg_measurements_coroutine():
                     try:
                         await master_connection.send(send_msg)
                     except websockets.exceptions.ConnectionClosed:
-                        logging.error('No connection while sending data - websockets.exceptions.ConnectionClosed')
+                        logging.error('No connection while sending data - websockets.exceptions.ConnectionClosed. Zerroing master_connection.')
+                        master_connection = None
                     except Exception as e:
                         logging.error(f'Some error during measurements sending to OSM - exception: {e.__doc__}')
                     else:
@@ -1106,7 +1113,7 @@ async def heart_rate():
 
 
 if __name__ == "__main__":
-    log_file_name = datetime.datetime.now().strftime('UPK_server_2019_%Y%m%d%H%M%S.log')
+    log_file_name = datetime.datetime.now().strftime('UPK_server_%Y%m%d%H%M%S.log')
     logging.basicConfig(format=u'%(filename)s[LINE:%(lineno)d]# %(levelname)-8s [%(asctime)s]  %(message)s',
                         level=logging.DEBUG, filename=log_file_name)
 
