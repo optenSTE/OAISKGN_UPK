@@ -12,13 +12,14 @@ import sys
 import socket
 from pathlib import Path
 import statistics
+import re
 
 # Настроечные переменные
 hostname = socket.gethostname()
 # address, port = socket.gethostbyname(hostname), 7681  # адрес websocket-сервера
 index_of_reflection = 1.4682
 speed_of_light = 299792458.0
-program_version = '20201201(2)'
+program_version = '20201221'
 output_measurements_order2 = ['T_degC', 'Fav_N', 'Fbend_N', 'Ice_mm']  # последовательность выдачи данных
 DEFAULT_TIMEOUT = 10000
 instrument_description_filename = 'instrument_description.json'
@@ -115,51 +116,68 @@ loop.set_debug(False)
 queue = asyncio.Queue(maxsize=0, loop=loop)
 peak_stream = None
 
+
+def valid_instrument_description(loc_instrument_description):
+    ip_template = re.compile("^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$")
+    important_fields = ['version', 'IP_address', 'SampleRate', 'devices']
+    device_important_fields = {'version', 'Sensor3110_1', 'Sensor3110_2', 'Sensor4100', 'x55_channel', 'CTES',
+                               'E', 'Asize', 'Bsize', 'Tmin', 'Tmax', 'Fmin', 'Fmax', 'Freserve', 'Bending_sensivity'}
+
+    try:
+        if not isinstance(loc_instrument_description, dict):
+            return False
+
+        # проверка наличия важных полей
+        for field in important_fields:
+            if field not in loc_instrument_description:
+                logging.error(f'no "{field}" field in instrument description')
+                return False
+        for device in loc_instrument_description['devices']:
+            for field in device_important_fields:
+                if field not in device:
+                    logging.error(f'no "{field}" field in device {device["Name"]}')
+                    return False
+
+        # проверка IP по шаблону
+        if not re.match(ip_template, loc_instrument_description['IP_address']):
+            logging.error(f'incorrect IP address')
+            return False
+
+        # проверяем готовность прибора
+        instrument_ip = loc_instrument_description['IP_address']
+        with socket.socket() as s:
+            s.settimeout(1)
+            instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
+            try:
+                s.connect(instrument_address)
+            except socket.error:
+                return_error(f'command port is not active on ip {instrument_ip}')
+                return False
+
+    except Exception as e:
+        logging.error(f'some exception during check instrument description: {e.__doc__}')
+        return False
+
+    return True
+
+
 async def connection_handler(connection, path):
     global master_connection, instrument_description, averaged_measurements_buffer_for_OSM
 
     logging.info('New connection {} - path {}'.format(connection.remote_address[:2], path))
 
-    if not master_connection:
-        master_connection = connection
-    else:
-        try:
-            # проверка того соединения - master_connection
-            logging.info('Master connection already exist, checking master connection')
-            await master_connection.ping(data=str(int(datetime.datetime.now().timestamp())))
-
-            # то соединение живо - закроем его и текущее будем master_connection
-            master_connection = connection
-
-        except websockets.exceptions.ConnectionClosed:
-            tmp_master_connection = connection
-            logging.info('master connection did not response, current connection become new master connection')
-            master_connection = connection
-        except Exception as e:
-            logging.error(f"Unexpected error:{sys.exc_info()[0]}, {e.__doc__}")
-            logging.info('master connection did not response, current connection become new master connection')
-            master_connection = connection
-
     while True:
         await asyncio.sleep(asyncio_pause_sec)
 
+        # ожидание входящего сообщения
         try:
             msg = await connection.recv()
         except websockets.exceptions.WebSocketException as e:
             # текущее соединение закрыто
-            logging.info(
-                f'There is no connection while receiving data - websockets.exceptions.WebSocketException, {str(e.args)}')
-
-            # очищаем список соединений
-            logging.info('Zeroing master connection...')
-            master_connection = None
-
-            # have no instrument from now
-            # instrument_description.clear()
-
+            logging.info(f'There is no connection while receiving data - websockets.exceptions.WebSocketException, {str(e.args)}')
             break
 
-        logging.info("Received a message:\n %r" % msg)
+        logging.info(f"Received a message: {msg}")
 
         json_msg = dict()
         try:
@@ -169,11 +187,20 @@ async def connection_handler(connection, path):
             json_msg.clear()
             continue
 
+        # проверка поступившего задания - если оно валидно, то данное соединение будет мастером
+        logging.info("Checking the instrument description...")
+        if not valid_instrument_description(json_msg):
+            logging.error('not valid instrument description, refuse current connection')
+            break
+
+        logging.info('it is ok - current connection become the master')
+        master_connection = connection
+
         try:
-            message_type = json_msg['type']
-            if message_type == "control":
+            if json_msg['type'] == "control":
+                logging.info(f'Поступило управляющее сообщение: {msg}')
                 # ToDo: сделать обработку управляющих сообщений
-                
+
                 continue
         except KeyError:
             # нет такого ключа - это задание
@@ -210,7 +237,6 @@ async def connection_handler(connection, path):
         instrument_description = json_msg
 
         await instrument_init()
-
 
 
 async def instrument_init():
@@ -481,7 +507,8 @@ async def wls_to_measurements_coroutine():
                 for (measurement_time, peaks_by_channel) in wavelengths_buffer['data'].items():
 
                     # время усредненного блока, в которое попадает это измерение
-                    averaged_block_time = measurement_time - measurement_time % (1 / instrument_description['SampleRate'])
+                    averaged_block_time = measurement_time - measurement_time % (
+                                1 / instrument_description['SampleRate'])
                     np.append([averaged_block_time], np.zeros(len(output_measurements_order2)))
 
                     devices_output3 = [measurement_time] + [np.nan] * len(output_measurements_order2) * len(devices)
@@ -490,7 +517,7 @@ async def wls_to_measurements_coroutine():
 
                     # переводим пики в пикометры
                     for channel, wls in peaks_by_channel.items():
-                        peaks_by_channel[channel] = [wl*1000 for wl in wls]
+                        peaks_by_channel[channel] = [wl * 1000 for wl in wls]
                         pass
 
                     # шаг 1 - находим рекомендованную температуру
@@ -514,14 +541,16 @@ async def wls_to_measurements_coroutine():
                             device_output = device.get_tension_fav_ex(wls[1], wls[2], wls[0])
 
                             for field_num, filed in enumerate(output_measurements_order2):
-                                devices_output3[1 + device_num * len(output_measurements_order2) + field_num] = device_output[filed]
+                                devices_output3[1 + device_num * len(output_measurements_order2) + field_num] = \
+                                device_output[filed]
 
                             raw_measurements_buffer_for_disk['data'][measurement_time].append(device_output['F1_N'])
                             raw_measurements_buffer_for_disk['data'][measurement_time].append(device_output['F2_N'])
                         else:
                             none_value = None
                             for field_num, filed in enumerate(output_measurements_order2):
-                                devices_output3[1 + device_num * len(output_measurements_order2) + field_num] = none_value
+                                devices_output3[
+                                    1 + device_num * len(output_measurements_order2) + field_num] = none_value
 
                             raw_measurements_buffer_for_disk['data'][measurement_time].append(none_value)
                             raw_measurements_buffer_for_disk['data'][measurement_time].append(none_value)
@@ -555,6 +584,7 @@ async def wls_to_measurements_coroutine():
         msg = 'wls_to_measurements is finishing'
         print(msg)
         logging.debug(msg)
+
 
 async def averaging_measurements_coroutine():
     """усреднение измерений"""
@@ -861,11 +891,9 @@ async def send_avg_measurements_coroutine():
                     try:
                         await master_connection.send(send_msg)
                     except websockets.exceptions.ConnectionClosed:
-                        logging.info(
-                            'No connection while sending data - websockets.exceptions.ConnectionClosed. Zeroing master connection')
-                        master_connection = None
+                        logging.error('No connection while sending data - websockets.exceptions.ConnectionClosed')
                     except Exception as e:
-                        logging.debug(f'Some error during measurements sending to OSM - exception: {e.__doc__}')
+                        logging.error(f'Some error during measurements sending to OSM - exception: {e.__doc__}')
                     else:
                         send_msg = 'sent'
 
@@ -1089,7 +1117,8 @@ if __name__ == "__main__":
         address = sys.argv[1]
         port = int(sys.argv[2])
     except Exception as e:
-        logging.critical(f'Restart program with two arguments (address and port, space is delimiter) - exception: {e.__doc__}')
+        logging.critical(
+            f'Restart program with two arguments (address and port, space is delimiter) - exception: {e.__doc__}')
         print('Restart program with two arguments (address and port, space is delimiter)')
         exit(0)
 
