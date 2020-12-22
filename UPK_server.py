@@ -13,6 +13,7 @@ import socket
 from pathlib import Path
 import statistics
 import re
+import win32api
 
 # Настроечные переменные
 hostname = socket.gethostname()
@@ -1111,6 +1112,44 @@ async def heart_rate():
         # restart current coroutine
         loop.create_task(heart_rate())
 
+def getFileProperties(fname):
+    """
+    Read all properties of the given file return them as a dictionary.
+    https://stackoverflow.com/questions/580924/how-to-access-a-files-properties-on-windows
+    """
+    propNames = ('Comments', 'InternalName', 'ProductName',
+        'CompanyName', 'LegalCopyright', 'ProductVersion',
+        'FileDescription', 'LegalTrademarks', 'PrivateBuild',
+        'FileVersion', 'OriginalFilename', 'SpecialBuild')
+
+    props = {'FixedFileInfo': None, 'StringFileInfo': None, 'FileVersion': None}
+
+    try:
+        # backslash as parm returns dictionary of numeric info corresponding to VS_FIXEDFILEINFO struc
+        fixedInfo = win32api.GetFileVersionInfo(fname, '\\')
+        props['FixedFileInfo'] = fixedInfo
+        props['FileVersion'] = "%d.%d.%d.%d" % (fixedInfo['FileVersionMS'] / 65536,
+                fixedInfo['FileVersionMS'] % 65536, fixedInfo['FileVersionLS'] / 65536,
+                fixedInfo['FileVersionLS'] % 65536)
+
+        # \VarFileInfo\Translation returns list of available (language, codepage)
+        # pairs that can be used to retreive string info. We are using only the first pair.
+        lang, codepage = win32api.GetFileVersionInfo(fname, '\\VarFileInfo\\Translation')[0]
+
+        # any other must be of the form \StringfileInfo\%04X%04X\parm_name, middle
+        # two are language/codepage pair returned from above
+
+        strInfo = {}
+        for propName in propNames:
+            strInfoPath = u'\\StringFileInfo\\%04X%04X\\%s' % (lang, codepage, propName)
+            ## print str_info
+            strInfo[propName] = win32api.GetFileVersionInfo(fname, strInfoPath)
+
+        props['StringFileInfo'] = strInfo
+    except:
+        pass
+
+    return props
 
 if __name__ == "__main__":
     log_file_name = datetime.datetime.now().strftime('UPK_server_%Y%m%d%H%M%S.log')
@@ -1118,6 +1157,7 @@ if __name__ == "__main__":
                         level=logging.DEBUG, filename=log_file_name)
 
     logging.info(u'Program starts v.' + program_version)
+    logging.info(getFileProperties(sys.argv[0]))
 
     address, port = None, None
     try:
