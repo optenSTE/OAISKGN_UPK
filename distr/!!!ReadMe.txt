@@ -14,3 +14,10 @@
 2. Ввести команду "cd C:\OAISKGN_UPK\distr"
 3. Ввести команду "OAISKGN_UPK_uninstall"
 4. Проверить отсутствие службы "ОАИСКГН. ПО УПК" в диспетчере локальных служб ОС Windows
+
+Для обновления служб:
+1. Скопировать exe-файл(ы) в папку C:\OAISKGN_UPK\distr
+2. Остановить службу "ОАИСКГН. ПО УПК" ("ОАИСКГН. Супервизор ПО УПК")
+3. Переименовать существующий файл OAISKGN_UPK.exe (OAISKGN_UPK_supervisor.exe) в OAISKGN_UPK_bak.exe (OAISKGN_UPK_supervisor_bak.exe)
+4. Переименовать файл обновления в OAISKGN_UPK.exe (OAISKGN_UPK_supervisor.exe)
+5. Запустить службу
