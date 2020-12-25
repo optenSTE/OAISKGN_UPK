@@ -1,6 +1,54 @@
 """
+UPK_supervisor
 Скрипт проверяет появление данных в указанной папке
 Если скорость поступления данных ниже порога, то выполняется перезапуск службы
+
+Также есть второй триггер, который перезапускает службу (без перезагрузки ИТО) с заданным интевалом
+
+ini-файл
+    ;*********************************
+    [main]
+    ;*********************************
+
+    ; шаблон имени файла для подсчета размера папки
+    files_template = *.txt
+
+    ; имя файла с описанием оборудования
+    instrument_description_filename = instrument_description.json
+
+    ; продолжительность перезагрузки прибора
+    ITO_rebooting_duration_sec = 40
+
+    ; пауза при перезапуске службы
+    win_service_restart_pause = 10
+
+
+
+    ;*********************************
+    [trigger1]
+    ;*********************************
+
+    ; минимальная скорость прироста размера папки, при которой не будет перезапускаться служба
+    dir_size_speed_threshold_mb_per_h = 8
+
+    ; имя службы для перезапуска
+    service_name = OAISKGN_UPK
+
+    ; интервал проверки
+    dir_check_interval_sec = 60
+
+    ; количество срабатываний триггера до реальных действий
+    num_of_triggers_before_action = 5
+
+
+
+    ;*********************************
+    [trigger2]
+    ;*********************************
+
+    ;интервал безусловной перезагрузки службы
+    win_service_restart_interval_sec = 3600
+
 """
 
 import datetime
@@ -16,9 +64,11 @@ from pathlib import Path
 import socket
 import random
 import win32api
+import configparser
 
-# Константы
-program_version = '17122020'
+program_version = '24122020'
+
+# Глобальные переменные
 files_template = '*.txt'  # шаблон имени файла для подсчета размера папки
 instrument_description_filename = 'instrument_description.json'  # имя файла с описанием оборудования
 ITO_rebooting_duration_sec = 40  # время перезагрузки прибора
@@ -71,6 +121,7 @@ def getFileProperties(fname):
         pass
 
     return props
+
 
 def action_when_trigger_released(ITO_reboot=False):
 
@@ -144,27 +195,47 @@ if __name__ == "__main__":
                         level=logging.DEBUG, filename=log_file_name)
 
     logging.info(u'Program starts v.' + program_version)
+    logging.info(f'EXE-file {sys.argv[0]}')
     logging.info(getFileProperties(sys.argv[0]))
 
-    program_params = None
-    try:
-        program_params = sys.argv
-        if len(program_params) != 6:
-            raise NameError('Wrong program parameters')
-    except Exception as e:
-        message = 'Wrong program parameters\n' \
-                  'OAISKGN_UPK_supervisor <dir_size_speed_threshold_mb_per_h> <service_name> <check_interval_sec> <num_of_triggers_before_action> <win_service_restart_interval_sec>\n' \
-                  'Restart as shown below\n' \
-                  'OAISKGN_UPK_supervisor 1 OAISKGN_UPK 60 5 10800'
-        print(message)
-        logging.error(message)
-        exit(0)
+    # default ini-values
+    dir_size_speed_threshold_mb_per_h = 8  # минимальная скорость прироста размера папки, при которой не будет перезапускаться служба
+    service_name = "OAISKGN_UPK"  # имя службы для перезапуска
+    dir_check_interval_sec = 60  # интервал проверки
+    num_of_triggers_before_action = 5  # количество срабатываний триггера до реальных действий
+    win_service_restart_interval_sec = 3600  # интервал безусловной перезагрузки службы
 
-    dir_size_speed_threshold_mb_per_h = float(program_params[1])  # минимальная скорость прироста размера папки, при которой не будет перезапускаться служба
-    service_name = program_params[2]  # имя службы для перезапуска
-    dir_check_interval_sec = float(program_params[3])  # интервал проверки
-    num_of_triggers_before_action = int(program_params[4])  # количество срабатываний триггера до реальных действий
-    win_service_restart_interval_sec = int(program_params[5])  # интервал безусловной перезагрузки службы
+    try:
+        filename, file_extension = os.path.splitext(sys.argv[0])
+        ini_file_name = f"{filename}.ini"
+        if not Path(ini_file_name).is_file():
+            raise FileExistsError(f'no file {ini_file_name}')
+
+        config = configparser.ConfigParser()
+
+        config.read(ini_file_name)
+
+        files_template = config['main']['files_template']
+        instrument_description_filename = config['main']['instrument_description_filename']
+        ITO_rebooting_duration_sec = float(config['main']['ITO_rebooting_duration_sec'])
+        win_service_restart_pause = float(config['main']['win_service_restart_pause'])
+
+        dir_size_speed_threshold_mb_per_h = float(config['trigger1']['dir_size_speed_threshold_mb_per_h'])
+        service_name = config['trigger1']['service_name']
+        dir_check_interval_sec = float(config['trigger1']['dir_check_interval_sec'])
+        num_of_triggers_before_action = float(config['trigger1']['num_of_triggers_before_action'])
+
+        win_service_restart_interval_sec = float(config['trigger2']['win_service_restart_interval_sec'])
+
+    except Exception as e:
+        logging.info(f'Error during ini-file reading: {str(e)}')
+        sys.exit(0)
+
+    # оставим в логе входные параметры
+    logging.info(f'dir_size_speed_threshold_mb_per_h={dir_size_speed_threshold_mb_per_h}, '
+                 f'service_name={service_name}, dir_check_interval_sec={dir_check_interval_sec}, '
+                 f'num_of_triggers_before_action={num_of_triggers_before_action}, '
+                 f'win_service_restart_interval_sec={win_service_restart_interval_sec}')
 
     # случайная добавка к интервалу перезагрузки - чтобы не было в одно и то же время
     win_service_restart_interval_sec += random.randint(-int(win_service_restart_interval_sec / 8),
