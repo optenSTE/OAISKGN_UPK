@@ -6,49 +6,56 @@ UPK_supervisor
 Также есть второй триггер, который перезапускает службу (без перезагрузки ИТО) с заданным интевалом
 
 ini-файл
-    ;*********************************
-    [main]
-    ;*********************************
 
-    ; шаблон имени файла для подсчета размера папки
-    files_template = *.txt
+;*********************************
+[main]
+;*********************************
 
-    ; имя файла с описанием оборудования
-    instrument_description_filename = instrument_description.json
+; instrument description file, default instrument_description.json
+; json-file with field 'IP_address' - contains ITO ip address, used to reboot it
+; should be in %data_dir_path% folder
+instrument_description_filename = instrument_description.json
 
-    ; продолжительность перезагрузки прибора
-    ITO_rebooting_duration_sec = 40
+; time period needs for ITO rebooting, default 40
+ITO_rebooting_duration_sec = 40
 
-    ; пауза при перезапуске службы
-    win_service_restart_pause = 10
-
-
-
-    ;*********************************
-    [trigger1]
-    ;*********************************
-
-    ; минимальная скорость прироста размера папки, при которой не будет перезапускаться служба
-    dir_size_speed_threshold_mb_per_h = 8
-
-    ; имя службы для перезапуска
-    service_name = OAISKGN_UPK
-
-    ; интервал проверки
-    dir_check_interval_sec = 60
-
-    ; количество срабатываний триггера до реальных действий
-    num_of_triggers_before_action = 5
+; pause after stopping the service, default 10
+win_service_restart_pause = 10
 
 
 
-    ;*********************************
-    [trigger2]
-    ;*********************************
+;*********************************
+[trigger1]
+;*********************************
 
-    ;интервал безусловной перезагрузки службы
-    win_service_restart_interval_sec = 3600
+; service name, default OAISKGN_UPK
+service_name = OAISKGN_UPK
 
+; data folder path, default
+data_dir_path = C:\OAISKGN_UPK\data
+
+; data files template, default *.txt
+files_template = *.txt
+
+; minimal data folder size speed when service work normal, default 8
+; less speed means some problems with the service - it will be restarted
+dir_size_speed_threshold_mb_per_h = 8
+
+; how often data folder should be checked, default 60
+dir_check_interval_sec = 60
+
+; how many low speed triggers released before service restarts, default 5
+num_of_triggers_before_action = 5
+
+
+
+;*********************************
+[trigger2]
+;*********************************
+
+; how often service restarts without any other conditions, default 3600
+; 0 means never
+win_service_restart_interval_sec = 3600
 """
 
 import datetime
@@ -66,7 +73,7 @@ import random
 import win32api
 import configparser
 
-program_version = '24122020'
+program_version = '25122020'
 
 # Глобальные переменные
 files_template = '*.txt'  # шаблон имени файла для подсчета размера папки
@@ -190,15 +197,8 @@ def action_when_trigger_released(ITO_reboot=False):
 
 
 if __name__ == "__main__":
-    log_file_name = datetime.datetime.now().strftime('UPK_supervisor_%Y%m%d%H%M%S.log')
-    logging.basicConfig(format=u'%(filename)s[LINE:%(lineno)d]# %(levelname)-8s [%(asctime)s]  %(message)s',
-                        level=logging.DEBUG, filename=log_file_name)
-
-    logging.info(u'Program starts v.' + program_version)
-    logging.info(f'EXE-file {sys.argv[0]}')
-    logging.info(getFileProperties(sys.argv[0]))
-
     # default ini-values
+    data_dir_path = r'C:\OAISKGN_UPK\data'
     dir_size_speed_threshold_mb_per_h = 8  # минимальная скорость прироста размера папки, при которой не будет перезапускаться служба
     service_name = "OAISKGN_UPK"  # имя службы для перезапуска
     dir_check_interval_sec = 60  # интервал проверки
@@ -215,11 +215,13 @@ if __name__ == "__main__":
 
         config.read(ini_file_name)
 
-        files_template = config['main']['files_template']
         instrument_description_filename = config['main']['instrument_description_filename']
         ITO_rebooting_duration_sec = float(config['main']['ITO_rebooting_duration_sec'])
         win_service_restart_pause = float(config['main']['win_service_restart_pause'])
 
+        data_dir_path = config['trigger1']['data_dir_path']
+        instrument_description_filename = data_dir_path + '\\' + instrument_description_filename
+        files_template = config['trigger1']['files_template']
         dir_size_speed_threshold_mb_per_h = float(config['trigger1']['dir_size_speed_threshold_mb_per_h'])
         service_name = config['trigger1']['service_name']
         dir_check_interval_sec = float(config['trigger1']['dir_check_interval_sec'])
@@ -228,8 +230,27 @@ if __name__ == "__main__":
         win_service_restart_interval_sec = float(config['trigger2']['win_service_restart_interval_sec'])
 
     except Exception as e:
-        logging.info(f'Error during ini-file reading: {str(e)}')
+        print(f'Error during ini-file reading: {str(e)}')
         sys.exit(0)
+
+    # check if folder exist, create if not
+    try:
+        os.makedirs(data_dir_path)
+    except FileExistsError:
+        # already exist
+        pass
+    except Exception as e:
+        print(f"Can't create folder {data_dir_path}: {str(e)}")
+        sys.exit(0)
+
+    log_file_name = datetime.datetime.now().strftime(f'{data_dir_path}\\UPK_supervisor_%Y%m%d%H%M%S.log')
+    logging.basicConfig(format=u'%(filename)s[LINE:%(lineno)d]# %(levelname)-8s [%(asctime)s]  %(message)s',
+                        level=logging.DEBUG, filename=log_file_name)
+
+    logging.info(u'Program starts v.' + program_version)
+    logging.info(f'EXE-file {sys.argv[0]}')
+    logging.info(getFileProperties(sys.argv[0]))
+
 
     # оставим в логе входные параметры
     logging.info(f'dir_size_speed_threshold_mb_per_h={dir_size_speed_threshold_mb_per_h}, '
@@ -250,7 +271,7 @@ if __name__ == "__main__":
 
     ITO_reboot_next_time = False
 
-    logging.info('Looking for instrument description file...')
+    logging.info(f'Looking for instrument description file {instrument_description_filename}...')
     instrument_ip = None
     while not instrument_ip:
         # если есть задание на диске, то загрузим его и начнем работать до получения нового задания
@@ -259,7 +280,7 @@ if __name__ == "__main__":
                 with open(instrument_description_filename, 'r') as f:
                     instrument_description = json.load(f)
             except Exception as e:
-                logging.debug(f'Some error during instrument description file reading; exception: {e.__doc__}')
+                logging.debug(f'Some error during instrument description file reading {instrument_description_filename}; exception: {e.__doc__}')
             else:
                 logging.info('Loaded instrument description ' + json.dumps(instrument_description))
 
@@ -272,7 +293,7 @@ if __name__ == "__main__":
     while True:
 
         # безуслованя перезагрузка по таймеру
-        if 1:
+        if win_service_restart_interval_sec > 0:
             cur_time = datetime.datetime.now().timestamp()
             if (cur_time - last_unconditional_reboot_time) >= win_service_restart_interval_sec > 0:
                 logging.info('Time-trigger released')
