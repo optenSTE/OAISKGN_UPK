@@ -103,8 +103,8 @@ class ODTiT:
             else:
                 param = [[sensor_num, cur_t, self.f_min - self.f_reserve], [sensor_num, cur_t, self.f_max + self.f_reserve], [sensor_num, cur_t, (self.f_min + self.f_max)/2]]  # для натяжной нет рекомендованной длины волны
 
-            wl_min = self._get_wl_from_value(*param[0])
-            wl_max = self._get_wl_from_value(*param[1])
+            wl_min = min(self._get_wl_from_value(*param[0]), self._get_wl_from_value(*param[1]))
+            wl_max = max(self._get_wl_from_value(*param[0]), self._get_wl_from_value(*param[1]))
             wl_recommended = self._get_wl_from_value(*param[2])
 
             candidates = []
