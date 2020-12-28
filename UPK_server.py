@@ -145,7 +145,7 @@ def valid_instrument_description(loc_instrument_description):
                     raise NameError(f'no "{field}" field in device {device["Name"]}')
 
         # распарсить DetectionSettings
-        ds = {}
+        ds = dict()
         try:
             ch = 0
             for k in loc_instrument_description['DetectionSettings'].split(', '):
@@ -153,7 +153,7 @@ def valid_instrument_description(loc_instrument_description):
                     ch = k.replace('!', '')
                     ds.setdefault(ch, [int(ch), 'name', 'description'])
                 else:
-                    ds[ch].append(k)
+                    ds[ch].append(int(k))
         except Exception as e:
             raise NameError(f'wrong DetectionSettings format, should be "3!, 250, 250, 0, 10000, 15000, 1, 4!, 250, 250, 0, 10000, 6000, 1"')
 
