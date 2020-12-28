@@ -5,7 +5,6 @@ import asyncio
 import json
 import hyperion
 import datetime
-import time
 from scipy.signal import find_peaks
 import numpy as np
 import pandas as pd
@@ -13,14 +12,15 @@ import sys
 import socket
 from pathlib import Path
 import statistics
-import os.path
+import re
+import win32api
 
 # Настроечные переменные
 hostname = socket.gethostname()
 # address, port = socket.gethostbyname(hostname), 7681  # адрес websocket-сервера
 index_of_reflection = 1.4682
 speed_of_light = 299792458.0
-program_version = '20201201'
+program_version = '20201225'
 output_measurements_order2 = ['T_degC', 'Fav_N', 'Fbend_N', 'Ice_mm']  # последовательность выдачи данных
 DEFAULT_TIMEOUT = 10000
 instrument_description_filename = 'instrument_description.json'
@@ -118,52 +118,67 @@ queue = asyncio.Queue(maxsize=0, loop=loop)
 peak_stream = None
 
 
+def valid_instrument_description(loc_instrument_description):
+    ip_template = re.compile("^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$")
+    important_fields = ['version', 'IP_address', 'SampleRate', 'devices']
+    device_important_fields = {'version', 'Sensor3110_1', 'Sensor3110_2', 'Sensor4100', 'x55_channel', 'CTES',
+                               'E', 'Asize', 'Bsize', 'Tmin', 'Tmax', 'Fmin', 'Fmax', 'Freserve', 'Bending_sensivity'}
+
+    try:
+        if not isinstance(loc_instrument_description, dict):
+            return False
+
+        # проверка наличия важных полей
+        for field in important_fields:
+            if field not in loc_instrument_description:
+                logging.error(f'no "{field}" field in instrument description')
+                return False
+        for device in loc_instrument_description['devices']:
+            for field in device_important_fields:
+                if field not in device:
+                    logging.error(f'no "{field}" field in device {device["Name"]}')
+                    return False
+
+        # проверка IP по шаблону
+        if not re.match(ip_template, loc_instrument_description['IP_address']):
+            logging.error(f'incorrect IP address')
+            return False
+
+        # проверяем готовность прибора
+        instrument_ip = loc_instrument_description['IP_address']
+        with socket.socket() as s:
+            s.settimeout(1)
+            instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
+            try:
+                s.connect(instrument_address)
+            except socket.error:
+                return_error(f'command port is not active on ip {instrument_ip}')
+                return False
+
+    except Exception as e:
+        logging.error(f'some exception during check instrument description: {e.__doc__}')
+        return False
+
+    return True
+
+
 async def connection_handler(connection, path):
     global master_connection, instrument_description, averaged_measurements_buffer_for_OSM
 
     logging.info('New connection {} - path {}'.format(connection.remote_address[:2], path))
 
-    # временный дескриптор соединения - после успешной настройки он станет постоянным
-    tmp_master_connection = None
-
-    if not master_connection:
-        tmp_master_connection = connection
-    else:
-        logging.info('check master connection')
-        try:
-            await master_connection.ping(data=str(int(datetime.datetime.now().timestamp())))
-        except websockets.exceptions.ConnectionClosed:
-            tmp_master_connection = connection
-            logging.info('master connection did not response, new master connection')
-        except:
-            logging.info("Unexpected error:", sys.exc_info()[0])
-        '''
-        else:
-            # master connection has already made, refuse this connection
-            logging.info('Reject incoming connection - master connection already done before')
-            return False
-        '''
-
     while True:
         await asyncio.sleep(asyncio_pause_sec)
 
+        # ожидание входящего сообщения
         try:
             msg = await connection.recv()
         except websockets.exceptions.WebSocketException as e:
-            # соединение закрыто
-            logging.info(
-                f'There is no connection while receiving data - websockets.exceptions.WebSocketException, {str(e.args)}')
-
-            # очищаем список соединений
-            logging.info('Zeroing master connection...')
-            master_connection = None
-
-            # have no instrument from now
-            # instrument_description.clear()
-
+            # текущее соединение закрыто
+            logging.info(f'There is no connection while receiving data - websockets.exceptions.WebSocketException, {str(e.args)}')
             break
 
-        logging.info("Received a message:\n %r" % msg)
+        logging.info(f"Received a message: {msg}")
 
         json_msg = dict()
         try:
@@ -171,7 +186,26 @@ async def connection_handler(connection, path):
         except json.JSONDecodeError:
             logging.info('wrong JSON message has been refused')
             json_msg.clear()
-            return
+            continue
+
+        # проверка поступившего задания - если оно валидно, то данное соединение будет мастером
+        logging.info("Checking the instrument description...")
+        if not valid_instrument_description(json_msg):
+            logging.error('not valid instrument description, refuse current connection')
+            break
+
+        logging.info('it is ok - current connection become the master')
+        master_connection = connection
+
+        try:
+            if json_msg['type'] == "control":
+                logging.info(f'Поступило управляющее сообщение: {msg}')
+                # ToDo: сделать обработку управляющих сообщений
+
+                continue
+        except KeyError:
+            # нет такого ключа - это задание
+            pass
 
         # если на диске уже есть задание, то сохраним его под другим именем
         if Path(instrument_description_filename).is_file():
@@ -213,13 +247,16 @@ async def connection_handler(connection, path):
 
         await instrument_init()
 
-        master_connection = tmp_master_connection
-
 
 async def instrument_init():
-    global instrument_description, devices, active_channels, x55_measurement_interval_sec, h1, data_averaging_interval_sec, measurements_buffer, peak_stream
+    global output_measurements_order2, instrument_description, devices, active_channels, x55_measurement_interval_sec, h1, data_averaging_interval_sec, measurements_buffer, peak_stream
 
     data_averaging_interval_sec = 1.0 / instrument_description['SampleRate']
+
+    if instrument_description['version'] == '0.1' or instrument_description['version'] == '0.2':
+        output_measurements_order2 = ['T_degC', 'Fav_N', 'Fbend_N', 'Ice_mm']  # последовательность выдачи данных
+    elif instrument_description['version'] == '0.3':
+        output_measurements_order2 = ['T_degC', 'Fav_N', 'Fbend_N', 'F1_N', 'F2_N']  # последовательность выдачи данных
 
     # вытаскиваем информацию об устройствах
     devices = list()
@@ -228,7 +265,7 @@ async def instrument_init():
         # ToDo перенести это в класс ODTiT
         device = None
         try:
-            if device_description['version'] == '0.1' or device_description['version'] == '0.2':
+            if device_description['version'] == '0.1' or device_description['version'] == '0.2' or device_description['version'] == '0.3':
                 device = ODTiT(device_description['x55_channel'])
                 device.id = device_description['ID']
                 device.name = device_description['Name']
@@ -278,7 +315,7 @@ async def instrument_init():
                 device.sensors[2].fg = device_description['Sensor3110_2']['FG']
                 device.sensors[2].ctet = device_description['Sensor3110_2']['CTET']
 
-            if device_description['version'] == '0.2':
+            if device_description['version'] == '0.2' or device_description['version'] == '0.3':
                 device.fmodel_f0 = device_description['Fmodel_F0']
                 device.fmodel_f1 = device_description['Fmodel_F1']
                 device.fmodel_f2 = device_description['Fmodel_F2']
@@ -325,14 +362,10 @@ async def instrument_init():
         except hyperion.HyperionError as e:
             return_error(e.__doc__)
             return None
-
-
     while not h1.is_ready:
         await asyncio.sleep(asyncio_pause_sec)
         pass
-
     logging.info('x55 is ready, sn', h1.serial_number)
-
     """
     h1 = hyperion.AsyncHyperion(instrument_ip, loop)
 
@@ -343,18 +376,15 @@ async def instrument_init():
         instrument_description['DetectionSettings'] = '1\tname\tdecription\t249\t250\t1\t1000\t16001\t1'
     detection_settings_list = instrument_description['DetectionSettings'].split('\t')
     my_ds = hyperion.HPeakDetectionSettings(*detection_settings_list)
-
     print('Detection settings:\nChannel setting_id name description boxcar_length diff_filter_length lockout ntv_period threshold mode')
     for channel in active_channels:
         # пользовательские настройки
         my_ds = hyperion.HPeakDetectionSettings(2, 'my ds', 'descr', 249, 250, 1, 1000, 16001)
-
         # запись настроек в память прибора
         # ToDo добавить проверку наличия настроек с таким id - если их нет, то нужно Add, а не Update
         await h1._execute_command('#UpdateDetectionSetting', my_ds.pack())
         # применение настроек для текущего канала
         await h1.set_channel_detection_setting_id(channel, my_ds.setting_id)
-
         # проверим что записалось
         detection_settings_ids = await h1.get_channel_detection_setting_ids()
         ds = await h1.get_detection_setting(detection_settings_ids[channel-1])
@@ -412,6 +442,14 @@ async def get_wls_from_x55_coroutine():
                     measurement_time = peak_data['timestamp']
 
                     # запись длин волн в буфер
+                    if 0:
+                        wls_buffer_for_saving['is_ready'] = False
+                        try:
+                            wls_buffer_for_saving['data'][measurement_time] = peaks_by_channel
+                        finally:
+                            wls_buffer_for_saving['is_ready'] = True
+
+                    # запись длин волн в буфер 2
                     if wls_buffer_for_disk['is_ready']:
                         wls_buffer_for_disk['is_ready'] = False
                         t = [measurement_time]
@@ -483,7 +521,8 @@ async def wls_to_measurements_coroutine():
                 for (measurement_time, peaks_by_channel) in wavelengths_buffer['data'].items():
 
                     # время усредненного блока, в которое попадает это измерение
-                    averaged_block_time = measurement_time - measurement_time % (1 / instrument_description['SampleRate'])
+                    averaged_block_time = measurement_time - measurement_time % (
+                                1 / instrument_description['SampleRate'])
                     np.append([averaged_block_time], np.zeros(len(output_measurements_order2)))
 
                     devices_output3 = [measurement_time] + [np.nan] * len(output_measurements_order2) * len(devices)
@@ -492,7 +531,7 @@ async def wls_to_measurements_coroutine():
 
                     # переводим пики в пикометры
                     for channel, wls in peaks_by_channel.items():
-                        peaks_by_channel[channel] = [wl*1000 for wl in wls]
+                        peaks_by_channel[channel] = [wl * 1000 for wl in wls]
                         pass
 
                     # шаг 1 - находим рекомендованную температуру
@@ -516,14 +555,16 @@ async def wls_to_measurements_coroutine():
                             device_output = device.get_tension_fav_ex(wls[1], wls[2], wls[0])
 
                             for field_num, filed in enumerate(output_measurements_order2):
-                                devices_output3[1 + device_num * len(output_measurements_order2) + field_num] = device_output[filed]
+                                devices_output3[1 + device_num * len(output_measurements_order2) + field_num] = \
+                                device_output[filed]
 
                             raw_measurements_buffer_for_disk['data'][measurement_time].append(device_output['F1_N'])
                             raw_measurements_buffer_for_disk['data'][measurement_time].append(device_output['F2_N'])
                         else:
                             none_value = None
                             for field_num, filed in enumerate(output_measurements_order2):
-                                devices_output3[1 + device_num * len(output_measurements_order2) + field_num] = none_value
+                                devices_output3[
+                                    1 + device_num * len(output_measurements_order2) + field_num] = none_value
 
                             raw_measurements_buffer_for_disk['data'][measurement_time].append(none_value)
                             raw_measurements_buffer_for_disk['data'][measurement_time].append(none_value)
@@ -557,6 +598,7 @@ async def wls_to_measurements_coroutine():
         msg = 'wls_to_measurements is finishing'
         print(msg)
         logging.debug(msg)
+
 
 async def averaging_measurements_coroutine():
     """усреднение измерений"""
@@ -647,19 +689,20 @@ async def averaging_measurements_coroutine():
                                 if 'Ice_mm' in field_name:
                                     ice = block_mean
 
-                        # расчет границ нормального тяжения - при котором виртуальный гололед не более 1мм
-                        # fok = f_extra(ice_threshold)
-                        ice_threshold = 1
-                        fok = 10 * (device.icemodel_i1 * ice_threshold + device.icemodel_i2 * (ice_threshold ** 2))
-                        fmodel_max = 10 * (
-                                device.fmodel_f2 * (t_max ** 2) + device.fmodel_f1 * t_max + device.fmodel_f0)
-                        fmodel_min = 10 * (
-                                device.fmodel_f2 * (t_min ** 2) + device.fmodel_f1 * t_min + device.fmodel_f0)
-                        fok_min = fmodel_min - fok
-                        fok_max = fmodel_max + fok
+                        if instrument_description['version'] == "0.1" or instrument_description['version'] == "0.2":
+                            # расчет границ нормального тяжения - при котором виртуальный гололед не более 1мм
+                            # fok = f_extra(ice_threshold)
+                            ice_threshold = 1
+                            fok = 10 * (device.icemodel_i1 * ice_threshold + device.icemodel_i2 * (ice_threshold ** 2))
+                            fmodel_max = 10 * (
+                                    device.fmodel_f2 * (t_max ** 2) + device.fmodel_f1 * t_max + device.fmodel_f0)
+                            fmodel_min = 10 * (
+                                    device.fmodel_f2 * (t_min ** 2) + device.fmodel_f1 * t_min + device.fmodel_f0)
+                            fok_min = fmodel_min - fok
+                            fok_max = fmodel_max + fok
 
-                        cur_measurements.append(fok_min)
-                        cur_measurements.append(fok_max)
+                            cur_measurements.append(fok_min)
+                            cur_measurements.append(fok_max)
 
                     # обработанные данные убираем из блока
                     measurements_buffer['data'] = measurements_buffer['data'].loc[
@@ -743,6 +786,8 @@ async def save_measurements_coroutine(buffer, file_type='avg'):
                     send_msg = '\t'.join(['%.3f' % x for x in buffer['data'][timestamp_msg]])
             except Exception as e:
                 logging.error(f'Some error during avg measurements sorting - exception: {e.__doc__}')
+                logging.error(str(e))
+                print(buffer['data'])
             finally:
                 buffer['is_ready'] = True
 
@@ -863,11 +908,10 @@ async def send_avg_measurements_coroutine():
                     try:
                         await master_connection.send(send_msg)
                     except websockets.exceptions.ConnectionClosed:
-                        logging.info(
-                            'No connection while sending data - websockets.exceptions.ConnectionClosed. Zeroing master connection')
+                        logging.error('No connection while sending data - websockets.exceptions.ConnectionClosed. Zerroing master_connection.')
                         master_connection = None
                     except Exception as e:
-                        logging.debug(f'Some error during measurements sending to OSM - exception: {e.__doc__}')
+                        logging.error(f'Some error during measurements sending to OSM - exception: {e.__doc__}')
                     else:
                         send_msg = 'sent'
 
@@ -966,10 +1010,8 @@ async def get_one_spectrum(hyperion_x55_async):
 '''
 async def clock_sync():
     clock_sync_interval_sec = 3600
-
     while h1.get_is_ready():
         await asyncio.sleep(asyncio_pause_sec)
-
     last_sync_time = 0
     while True:
         await asyncio.sleep(asyncio_pause_sec)
@@ -1035,8 +1077,7 @@ async def save_spectrum():
 async def heart_rate():
     heart_rate_timeout_sec = 10
     delimiter = ' '
-
-    await asyncio.sleep(heart_rate_timeout_sec)
+    # await asyncio.sleep(heart_rate_timeout_sec)
 
     try:
         out_str = f'heart_rate_order: connection {delimiter.join([str(x) for x in coroutine_heart_rate.keys()])}' + delimiter
@@ -1081,20 +1122,60 @@ async def heart_rate():
         # restart current coroutine
         loop.create_task(heart_rate())
 
+def getFileProperties(fname):
+    """
+    Read all properties of the given file return them as a dictionary.
+    https://stackoverflow.com/questions/580924/how-to-access-a-files-properties-on-windows
+    """
+    propNames = ('Comments', 'InternalName', 'ProductName',
+        'CompanyName', 'LegalCopyright', 'ProductVersion',
+        'FileDescription', 'LegalTrademarks', 'PrivateBuild',
+        'FileVersion', 'OriginalFilename', 'SpecialBuild')
+
+    props = {'FixedFileInfo': None, 'StringFileInfo': None, 'FileVersion': None}
+
+    try:
+        # backslash as parm returns dictionary of numeric info corresponding to VS_FIXEDFILEINFO struc
+        fixedInfo = win32api.GetFileVersionInfo(fname, '\\')
+        props['FixedFileInfo'] = fixedInfo
+        props['FileVersion'] = "%d.%d.%d.%d" % (fixedInfo['FileVersionMS'] / 65536,
+                fixedInfo['FileVersionMS'] % 65536, fixedInfo['FileVersionLS'] / 65536,
+                fixedInfo['FileVersionLS'] % 65536)
+
+        # \VarFileInfo\Translation returns list of available (language, codepage)
+        # pairs that can be used to retreive string info. We are using only the first pair.
+        lang, codepage = win32api.GetFileVersionInfo(fname, '\\VarFileInfo\\Translation')[0]
+
+        # any other must be of the form \StringfileInfo\%04X%04X\parm_name, middle
+        # two are language/codepage pair returned from above
+
+        strInfo = {}
+        for propName in propNames:
+            strInfoPath = u'\\StringFileInfo\\%04X%04X\\%s' % (lang, codepage, propName)
+            ## print str_info
+            strInfo[propName] = win32api.GetFileVersionInfo(fname, strInfoPath)
+
+        props['StringFileInfo'] = strInfo
+    except:
+        pass
+
+    return props
 
 if __name__ == "__main__":
-    log_file_name = datetime.datetime.now().strftime('UPK_server_2019_%Y%m%d%H%M%S.log')
+    log_file_name = datetime.datetime.now().strftime('UPK_server_%Y%m%d%H%M%S.log')
     logging.basicConfig(format=u'%(filename)s[LINE:%(lineno)d]# %(levelname)-8s [%(asctime)s]  %(message)s',
                         level=logging.DEBUG, filename=log_file_name)
 
     logging.info(u'Program starts v.' + program_version)
+    logging.info(getFileProperties(sys.argv[0]))
 
     address, port = None, None
     try:
         address = sys.argv[1]
         port = int(sys.argv[2])
     except Exception as e:
-        logging.critical(f'Restart program with two arguments (address and port, space is delimiter) - exception: {e.__doc__}')
+        logging.critical(
+            f'Restart program with two arguments (address and port, space is delimiter) - exception: {e.__doc__}')
         print('Restart program with two arguments (address and port, space is delimiter)')
         exit(0)
 
@@ -1134,7 +1215,7 @@ if __name__ == "__main__":
 
     # если есть задание на диске, то загрузим его и начнем работать до получения нового задания
     if Path(instrument_description_filename).is_file():
-        # instrument description file exists
+        # file exists
         logging.info('Found instrument description file')
         try:
             with open(instrument_description_filename, 'r') as f:
@@ -1143,47 +1224,6 @@ if __name__ == "__main__":
             logging.debug(f'Some error during instrument decsription file reading; exception: {e.__doc__}')
         else:
             logging.info('Loaded instrument description ' + json.dumps(instrument_description))
-
-        initial_reboot = False
-        if initial_reboot:
-            instrument_ip = instrument_description['IP_address']
-
-            # проверка готовности прибора (должен отвечать порт, по которому идут команды)
-            with socket.socket() as s:
-                s.settimeout(1)
-                instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
-                try:
-                    s.connect(instrument_address)  # подключаемся к порту команд
-                except socket.error:
-                    return_error('command port is not active on ip ' + instrument_ip)
-                    pass
-            logging.info("Hyperion command port test passed")
-
-            # перегружаем прибор и ждем его загрузки
-            logging.info("Hyperion reboot")
-            x55 = hyperion.Hyperion(instrument_ip)
-            x55.reboot()
-
-            # ожижание перезагрузки
-            x55_reboot_time_sec = 35  # время, необходимое для перезагрузки прибора
-            time.sleep(x55_reboot_time_sec)
-
-            # проверка готовности прибора (должен отвечать порт, по которому идут команды)
-            with socket.socket() as s:
-                s.settimeout(x55_reboot_time_sec)
-                instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
-                try:
-                    s.connect(instrument_address)  # подключаемся к порту команд
-                except socket.error:
-                    return_error('Hyperion command port is not active on ip ' + instrument_ip)
-                    pass
-            logging.info("Hyperion command port test passed after rebooting")
-
-            x56 = hyperion.Hyperion(instrument_ip)
-            print('serial_number', x56.serial_number)
-            print('laser_scan_speed', x56.laser_scan_speed)
-            pass
-
         loop.create_task(instrument_init())
 
     loop.run_forever()
