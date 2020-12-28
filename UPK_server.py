@@ -20,7 +20,7 @@ hostname = socket.gethostname()
 # address, port = socket.gethostbyname(hostname), 7681  # адрес websocket-сервера
 index_of_reflection = 1.4682
 speed_of_light = 299792458.0
-program_version = '20201225'
+program_version = '25122020'
 output_measurements_order2 = ['T_degC', 'Fav_N', 'Fbend_N', 'Ice_mm']  # последовательность выдачи данных
 DEFAULT_TIMEOUT = 10000
 instrument_description_filename = 'instrument_description.json'
@@ -119,30 +119,49 @@ peak_stream = None
 
 
 def valid_instrument_description(loc_instrument_description):
-    ip_template = re.compile("^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$")
-    important_fields = ['version', 'IP_address', 'SampleRate', 'devices']
-    device_important_fields = {'version', 'Sensor3110_1', 'Sensor3110_2', 'Sensor4100', 'x55_channel', 'CTES',
-                               'E', 'Asize', 'Bsize', 'Tmin', 'Tmax', 'Fmin', 'Fmax', 'Freserve', 'Bending_sensivity'}
+    '''
 
-    try:
+    :param loc_instrument_description: dict() - what should be checked
+    :return: DetectionSettings - dict('ch_num': [Boxcar (pm), Diff (pm), Lockout (pm), NTV (pm), Threshold, Mode])
+    Raises NameError exception
+    '''
+    ip_template = re.compile("^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$")
+    important_fields = ['version', 'IP_address', 'SampleRate', 'devices', 'DetectionSettings']
+    device_important_fields = ['version', 'Sensor3110_1', 'Sensor3110_2', 'Sensor4100', 'x55_channel', 'CTES',
+                               'E', 'Asize', 'Bsize', 'Tmin', 'Tmax', 'Fmin', 'Fmax', 'Freserve', 'Bending_sensivity']
+
+    if 1:
         if not isinstance(loc_instrument_description, dict):
-            return False
+            raise NameError(f'wrong format of instrument description: {loc_instrument_description}')
 
         # проверка наличия важных полей
         for field in important_fields:
             if field not in loc_instrument_description:
-                logging.error(f'no "{field}" field in instrument description')
-                return False
+                raise NameError(f'no "{field}" field in instrument description')
+
         for device in loc_instrument_description['devices']:
             for field in device_important_fields:
                 if field not in device:
-                    logging.error(f'no "{field}" field in device {device["Name"]}')
-                    return False
+                    raise NameError(f'no "{field}" field in device {device["Name"]}')
+
+        # распарсить DetectionSettings
+        ds = {}
+        try:
+            ch = 0
+            for k in loc_instrument_description['DetectionSettings'].split(', '):
+                if '!' in k:
+                    ch = k.replace('!', '')
+                    ds.setdefault(ch, [int(ch), 'name', 'description'])
+                else:
+                    ds[ch].append(k)
+        except Exception as e:
+            raise NameError(f'wrong DetectionSettings format, should be "3!, 250, 250, 0, 10000, 15000, 1, 4!, 250, 250, 0, 10000, 6000, 1"')
 
         # проверка IP по шаблону
         if not re.match(ip_template, loc_instrument_description['IP_address']):
-            logging.error(f'incorrect IP address')
-            return False
+            raise NameError(f'incorrect IP address')
+
+        return ds
 
         # проверяем готовность прибора
         instrument_ip = loc_instrument_description['IP_address']
@@ -152,14 +171,9 @@ def valid_instrument_description(loc_instrument_description):
             try:
                 s.connect(instrument_address)
             except socket.error:
-                return_error(f'command port is not active on ip {instrument_ip}')
-                return False
+                raise ConnectionError(f'command port is not active {instrument_ip}:{hyperion.COMMAND_PORT}')
 
-    except Exception as e:
-        logging.error(f'some exception during check instrument description: {e.__doc__}')
-        return False
-
-    return True
+        return ds
 
 
 async def connection_handler(connection, path):
@@ -180,18 +194,26 @@ async def connection_handler(connection, path):
 
         logging.info(f"Received a message: {msg}")
 
+        msg1 = msg.replace("\'", "\"")
         json_msg = dict()
         try:
-            json_msg = json.loads(msg.replace("\'", "\""))
-        except json.JSONDecodeError:
-            logging.info('wrong JSON message has been refused')
+            json_msg = json.loads(msg1)
+        except json.JSONDecodeError as e:
+            logging.critical(f'wrong JSON message has been refused, error {e}')
             json_msg.clear()
-            continue
+            break
 
         # проверка поступившего задания - если оно валидно, то данное соединение будет мастером
         logging.info("Checking the instrument description...")
-        if not valid_instrument_description(json_msg):
-            logging.error('not valid instrument description, refuse current connection')
+        try:
+            json_msg['DetectionSettings'] = valid_instrument_description(json_msg)
+        except NameError as e:
+            # wrong instrument description
+            logging.error(e)
+            break
+        except ConnectionError as e:
+            # no connection with ITO
+            logging.error(e)
             break
 
         logging.info('it is ok - current connection become the master')
@@ -369,17 +391,10 @@ async def instrument_init():
     """
     h1 = hyperion.AsyncHyperion(instrument_ip, loop)
 
-    """
-    # разбор задания
-    if len(instrument_description['DetectionSettings']) < 5:
-        'setting_id, name, description, boxcar_length, diff_filter_length, lockout, ntv_period, threshold, mode'
-        instrument_description['DetectionSettings'] = '1\tname\tdecription\t249\t250\t1\t1000\t16001\t1'
-    detection_settings_list = instrument_description['DetectionSettings'].split('\t')
-    my_ds = hyperion.HPeakDetectionSettings(*detection_settings_list)
-    print('Detection settings:\nChannel setting_id name description boxcar_length diff_filter_length lockout ntv_period threshold mode')
-    for channel in active_channels:
+    ds = instrument_description['DetectionSettings']
+    for channel in ds.keys():
         # пользовательские настройки
-        my_ds = hyperion.HPeakDetectionSettings(2, 'my ds', 'descr', 249, 250, 1, 1000, 16001)
+        my_ds = hyperion.HPeakDetectionSettings(channel, 'settings_name', 'settings_descr', ds[channel][0], 250, 1, 1000, 16001)
         # запись настроек в память прибора
         # ToDo добавить проверку наличия настроек с таким id - если их нет, то нужно Add, а не Update
         await h1._execute_command('#UpdateDetectionSetting', my_ds.pack())
@@ -389,7 +404,7 @@ async def instrument_init():
         detection_settings_ids = await h1.get_channel_detection_setting_ids()
         ds = await h1.get_detection_setting(detection_settings_ids[channel-1])
         print(channel, ds.setting_id, ds.name, ds.description, ds.boxcar_length, ds.diff_filter_length, ds.lockout, ds.ntv_period, ds.threshold, ds.mode)
-    """
+
     logging.info(f'Instrument {await h1.get_instrument_name()} connected')
     # запускаем процедуру периодического получения спектра
     # await get_one_spectrum(h1)
