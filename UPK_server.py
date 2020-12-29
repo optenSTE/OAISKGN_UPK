@@ -14,13 +14,14 @@ from pathlib import Path
 import statistics
 import re
 import win32api
+import os
 
 # Настроечные переменные
 hostname = socket.gethostname()
 # address, port = socket.gethostbyname(hostname), 7681  # адрес websocket-сервера
 index_of_reflection = 1.4682
 speed_of_light = 299792458.0
-program_version = '25122020'
+program_version = '29122020'
 output_measurements_order2 = ['T_degC', 'Fav_N', 'Fbend_N', 'Ice_mm']  # последовательность выдачи данных
 DEFAULT_TIMEOUT = 10000
 instrument_description_filename = 'instrument_description.json'
@@ -120,9 +121,8 @@ peak_stream = None
 
 def valid_instrument_description(loc_instrument_description):
     '''
-
     :param loc_instrument_description: dict() - what should be checked
-    :return: DetectionSettings - dict('ch_num': [Boxcar (pm), Diff (pm), Lockout (pm), NTV (pm), Threshold, Mode])
+    :return: DetectionSettings - dict('ch_num': [Name, Description, Boxcar (pm), Diff (pm), Lockout (pm), NTV (pm), Threshold, Mode])
     Raises NameError exception
     '''
     ip_template = re.compile("^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$")
@@ -144,24 +144,32 @@ def valid_instrument_description(loc_instrument_description):
                 if field not in device:
                     raise NameError(f'no "{field}" field in device {device["Name"]}')
 
-        # распарсить DetectionSettings
+        # распарсить DetectionSettings в dict(), если не было сделано до этого
         ds = dict()
-        try:
-            ch = 0
-            for k in loc_instrument_description['DetectionSettings'].split(', '):
-                if '!' in k:
-                    ch = k.replace('!', '')
-                    ds.setdefault(ch, [int(ch), 'name', 'description'])
-                else:
-                    ds[ch].append(int(k))
-        except Exception as e:
-            raise NameError(f'wrong DetectionSettings format, should be "3!, 250, 250, 0, 10000, 15000, 1, 4!, 250, 250, 0, 10000, 6000, 1"')
+        if isinstance(loc_instrument_description['DetectionSettings'], str):
+            try:
+                ch = 0
+                for k in loc_instrument_description['DetectionSettings'].split(', '):
+                    if '!' in k:
+                        ch = k.replace('!', '')
+                        ds.setdefault(ch, [int(ch)])
+                    else:
+                        # все что возможно, переводим в int
+                        try:
+                            k = int(k)
+                        except:
+                            pass
+                        finally:
+                            ds[ch].append(k)
+    
+            except Exception as e:
+                raise NameError(f'wrong DetectionSettings format, should be like "3!, name, disc, 250, 250, 0, 10000, 15000, Peak, 4!, name, disc, 250, 250, 0, 10000, 6000, Peak"')
+        else:
+            ds = loc_instrument_description['DetectionSettings']
 
         # проверка IP по шаблону
         if not re.match(ip_template, loc_instrument_description['IP_address']):
             raise NameError(f'incorrect IP address')
-
-        return ds
 
         # проверяем готовность прибора
         instrument_ip = loc_instrument_description['IP_address']
@@ -391,19 +399,35 @@ async def instrument_init():
     """
     h1 = hyperion.AsyncHyperion(instrument_ip, loop)
 
-    ds = instrument_description['DetectionSettings']
-    for channel in ds.keys():
-        # пользовательские настройки
-        my_ds = hyperion.HPeakDetectionSettings(channel, 'settings_name', 'settings_descr', ds[channel][0], 250, 1, 1000, 16001)
-        # запись настроек в память прибора
-        # ToDo добавить проверку наличия настроек с таким id - если их нет, то нужно Add, а не Update
-        await h1._execute_command('#UpdateDetectionSetting', my_ds.pack())
-        # применение настроек для текущего канала
-        await h1.set_channel_detection_setting_id(channel, my_ds.setting_id)
-        # проверим что записалось
-        detection_settings_ids = await h1.get_channel_detection_setting_ids()
-        ds = await h1.get_detection_setting(detection_settings_ids[channel-1])
-        print(channel, ds.setting_id, ds.name, ds.description, ds.boxcar_length, ds.diff_filter_length, ds.lockout, ds.ntv_period, ds.threshold, ds.mode)
+    if 0:
+        logging.info(f'Applying DetectionSettings')
+        ds = instrument_description['DetectionSettings']
+        for (key, value) in ds.items():
+            channel = int(key)
+
+            # пользовательские настройки
+            desired_ds = hyperion.HPeakDetectionSettings(*value)
+            logging.info(f'Channel {channel}, settings :{desired_ds.pack()}')
+
+            await h1.set_channel_detection_setting_id(channel, 128)
+            # сначала удалить,...
+            await h1.remove_detection_setting(desired_ds.setting_id)
+
+            # ... а потом записать настройки в память прибора
+            await h1.add_or_update_detection_setting(desired_ds)
+
+            # применение настроек для текущего канала
+            await h1.set_channel_detection_setting_id(channel, desired_ds.setting_id)
+
+            """
+            # проверим что записалось
+            actual_ds = await h1.get_channel_detection_setting(channel)
+    
+            if actual_ds.pack() == desired_ds.pack():
+                print(channel, actual_ds.pack())
+            else:
+                print('wrong')
+            """
 
     logging.info(f'Instrument {await h1.get_instrument_name()} connected')
     # запускаем процедуру периодического получения спектра
@@ -1239,6 +1263,7 @@ if __name__ == "__main__":
             logging.debug(f'Some error during instrument decsription file reading; exception: {e.__doc__}')
         else:
             logging.info('Loaded instrument description ' + json.dumps(instrument_description))
+
         loop.create_task(instrument_init())
 
     loop.run_forever()
