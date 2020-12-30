@@ -15,6 +15,7 @@ import statistics
 import re
 import win32api
 import os
+import struct
 
 # Настроечные переменные
 hostname = socket.gethostname()
@@ -119,69 +120,70 @@ queue = asyncio.Queue(maxsize=0, loop=loop)
 peak_stream = None
 
 
-def valid_instrument_description(loc_instrument_description):
-    '''
+def validate_instrument_description(loc_instrument_description):
+    """
     :param loc_instrument_description: dict() - what should be checked
-    :return: DetectionSettings - dict('ch_num': [Name, Description, Boxcar (pm), Diff (pm), Lockout (pm), NTV (pm), Threshold, Mode])
-    Raises NameError exception
-    '''
-    ip_template = re.compile("^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$")
-    important_fields = ['version', 'IP_address', 'SampleRate', 'devices', 'DetectionSettings']
+            if key 'DetectionSettings' is str, it converts to dict('ch_num': [Name, Description, Boxcar (pm), Diff (pm), Lockout (pm), NTV (pm), Threshold, Mode])
+    :return: no return
+    Raises NameError exception if wrong format or ConnectionError if ito doesn't answer
+    """
+    ip_template = re.compile(
+        "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$")
+    important_fields = ['version', 'IP_address', 'SampleRate', 'devices', 'DetectionSettings', 'DateTime']
     device_important_fields = ['version', 'Sensor3110_1', 'Sensor3110_2', 'Sensor4100', 'x55_channel', 'CTES',
                                'E', 'Asize', 'Bsize', 'Tmin', 'Tmax', 'Fmin', 'Fmax', 'Freserve', 'Bending_sensivity']
 
-    if 1:
-        if not isinstance(loc_instrument_description, dict):
-            raise NameError(f'wrong format of instrument description: {loc_instrument_description}')
+    if not isinstance(loc_instrument_description, dict):
+        raise NameError(f'wrong format of instrument description: {loc_instrument_description}')
 
-        # проверка наличия важных полей
-        for field in important_fields:
-            if field not in loc_instrument_description:
-                raise NameError(f'no "{field}" field in instrument description')
+    # проверка наличия важных полей
+    for field in important_fields:
+        if field not in loc_instrument_description:
+            raise NameError(f'no "{field}" field in instrument description')
 
-        for device in loc_instrument_description['devices']:
-            for field in device_important_fields:
-                if field not in device:
-                    raise NameError(f'no "{field}" field in device {device["Name"]}')
+    for device in loc_instrument_description['devices']:
+        for field in device_important_fields:
+            if field not in device:
+                raise NameError(f'no "{field}" field in device {device["Name"]}')
 
-        # распарсить DetectionSettings в dict(), если не было сделано до этого
-        ds = dict()
-        if isinstance(loc_instrument_description['DetectionSettings'], str):
-            try:
-                ch = 0
-                for k in loc_instrument_description['DetectionSettings'].split(', '):
-                    if '!' in k:
-                        ch = k.replace('!', '')
-                        ds.setdefault(ch, [int(ch)])
-                    else:
-                        # все что возможно, переводим в int
-                        try:
-                            k = int(k)
-                        except:
-                            pass
-                        finally:
-                            ds[ch].append(k)
-    
-            except Exception as e:
-                raise NameError(f'wrong DetectionSettings format, should be like "3!, name, disc, 250, 250, 0, 10000, 15000, Peak, 4!, name, disc, 250, 250, 0, 10000, 6000, Peak"')
-        else:
-            ds = loc_instrument_description['DetectionSettings']
+    # распарсить DetectionSettings в dict(), если не было сделано до этого
+    ds = dict()
+    if isinstance(loc_instrument_description['DetectionSettings'], str):
+        try:
+            ch = 0
+            for k in loc_instrument_description['DetectionSettings'].split(', '):
+                if '!' in k:
+                    ch = k.replace('!', '')
+                    ds.setdefault(ch, [int(ch)])
+                else:
+                    # все что возможно, переводим в int
+                    try:
+                        k = int(k)
+                    except:
+                        pass
+                    finally:
+                        ds[ch].append(k)
 
-        # проверка IP по шаблону
-        if not re.match(ip_template, loc_instrument_description['IP_address']):
-            raise NameError(f'incorrect IP address')
+        except Exception as e:
+            raise NameError(
+                f'wrong DetectionSettings format, should be like "3!, name, disc, 250, 250, 0, 10000, 15000, Peak, 4!, name, disc, 250, 250, 0, 10000, 6000, Peak"')
+        loc_instrument_description['DetectionSettings'] = ds
 
-        # проверяем готовность прибора
-        instrument_ip = loc_instrument_description['IP_address']
-        with socket.socket() as s:
-            s.settimeout(1)
-            instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
-            try:
-                s.connect(instrument_address)
-            except socket.error:
-                raise ConnectionError(f'command port is not active {instrument_ip}:{hyperion.COMMAND_PORT}')
+    # проверка IP по шаблону
+    if not re.match(ip_template, loc_instrument_description['IP_address']):
+        raise NameError(f'incorrect IP address')
 
-        return ds
+    # проверяем готовность прибора
+    instrument_ip = loc_instrument_description['IP_address']
+    with socket.socket() as s:
+        s.settimeout(1)
+        instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
+        try:
+            s.connect(instrument_address)
+        except socket.error:
+            raise ConnectionError(f'command port is not active {instrument_ip}:{hyperion.COMMAND_PORT}')
+
+    return ds
 
 
 async def connection_handler(connection, path):
@@ -197,7 +199,8 @@ async def connection_handler(connection, path):
             msg = await connection.recv()
         except websockets.exceptions.WebSocketException as e:
             # текущее соединение закрыто
-            logging.info(f'There is no connection while receiving data - websockets.exceptions.WebSocketException, {str(e.args)}')
+            logging.info(
+                f'There is no connection while receiving data - websockets.exceptions.WebSocketException, {str(e.args)}')
             break
 
         logging.info(f"Received a message: {msg}")
@@ -214,7 +217,7 @@ async def connection_handler(connection, path):
         # проверка поступившего задания - если оно валидно, то данное соединение будет мастером
         logging.info("Checking the instrument description...")
         try:
-            json_msg['DetectionSettings'] = valid_instrument_description(json_msg)
+            validate_instrument_description(json_msg)
         except NameError as e:
             # wrong instrument description
             logging.error(e)
@@ -241,7 +244,9 @@ async def connection_handler(connection, path):
         if Path(instrument_description_filename).is_file():
             # file exists
             try:
-                new_instrument_description_filename = os.path.splitext(instrument_description_filename)[0] + datetime.datetime.now().strftime('_before_%Y%m%d%H%M%S') + os.path.splitext(instrument_description_filename)[1]
+                new_instrument_description_filename = os.path.splitext(instrument_description_filename)[
+                                                          0] + datetime.datetime.now().strftime(
+                    '_before_%Y%m%d%H%M%S') + os.path.splitext(instrument_description_filename)[1]
                 os.rename(instrument_description_filename, new_instrument_description_filename)
             finally:
                 pass
@@ -295,7 +300,9 @@ async def instrument_init():
         # ToDo перенести это в класс ODTiT
         device = None
         try:
-            if device_description['version'] == '0.1' or device_description['version'] == '0.2' or device_description['version'] == '0.3':
+            if device_description['version'] == '0.1' \
+                    or device_description['version'] == '0.2' \
+                    or device_description['version'] == '0.3':
                 device = ODTiT(device_description['x55_channel'])
                 device.id = device_description['ID']
                 device.name = device_description['Name']
@@ -398,7 +405,27 @@ async def instrument_init():
     logging.info('x55 is ready, sn', h1.serial_number)
     """
     h1 = hyperion.AsyncHyperion(instrument_ip, loop)
+    logging.info(f'Instrument {await h1.get_instrument_name()} connected')
 
+    # настройка времени прибора
+    try:
+        ito_datetime = await h1._execute_command('#GetInstrumentUtcDateTime')
+        ito_datetime = struct.unpack_from('HHHHHH', ito_datetime.content)
+        logging.info(f'Current ITO time :{ito_datetime}')
+
+        logging.info(f'Setting ITO datetime to {instrument_description["DateTime"]}')
+
+        osm_datetime = datetime.datetime.strptime(instrument_description["DateTime"], "%Y %m %d %H %M %S")
+        await h1.set_instrument_utc_date_time(osm_datetime)
+
+        ito_datetime = await h1._execute_command('#GetInstrumentUtcDateTime')
+        ito_datetime = struct.unpack_from('HHHHHH', ito_datetime.content)
+        logging.info(f'New ITO time :{ito_datetime}')
+
+    except Exception as e:
+        logging.error(f"Error during time setting :{e}")
+
+    # применение настроек PeakDetection
     if 0:
         logging.info(f'Applying DetectionSettings')
         ds = instrument_description['DetectionSettings']
@@ -422,14 +449,13 @@ async def instrument_init():
             """
             # проверим что записалось
             actual_ds = await h1.get_channel_detection_setting(channel)
-    
+
             if actual_ds.pack() == desired_ds.pack():
                 print(channel, actual_ds.pack())
             else:
                 print('wrong')
             """
 
-    logging.info(f'Instrument {await h1.get_instrument_name()} connected')
     # запускаем процедуру периодического получения спектра
     # await get_one_spectrum(h1)
 
@@ -561,7 +587,7 @@ async def wls_to_measurements_coroutine():
 
                     # время усредненного блока, в которое попадает это измерение
                     averaged_block_time = measurement_time - measurement_time % (
-                                1 / instrument_description['SampleRate'])
+                            1 / instrument_description['SampleRate'])
                     np.append([averaged_block_time], np.zeros(len(output_measurements_order2)))
 
                     devices_output3 = [measurement_time] + [np.nan] * len(output_measurements_order2) * len(devices)
@@ -595,7 +621,7 @@ async def wls_to_measurements_coroutine():
 
                             for field_num, filed in enumerate(output_measurements_order2):
                                 devices_output3[1 + device_num * len(output_measurements_order2) + field_num] = \
-                                device_output[filed]
+                                    device_output[filed]
 
                             raw_measurements_buffer_for_disk['data'][measurement_time].append(device_output['F1_N'])
                             raw_measurements_buffer_for_disk['data'][measurement_time].append(device_output['F2_N'])
@@ -947,7 +973,8 @@ async def send_avg_measurements_coroutine():
                     try:
                         await master_connection.send(send_msg)
                     except websockets.exceptions.ConnectionClosed:
-                        logging.error('No connection while sending data - websockets.exceptions.ConnectionClosed. Zerroing master_connection.')
+                        logging.error(
+                            'No connection while sending data - websockets.exceptions.ConnectionClosed. Zerroing master_connection.')
                         master_connection = None
                     except Exception as e:
                         logging.error(f'Some error during measurements sending to OSM - exception: {e.__doc__}')
@@ -994,14 +1021,6 @@ async def send_avg_measurements_coroutine():
         loop.create_task(send_avg_measurements_coroutine())
 
 
-async def save_wls():
-    """ Функция записывает накопленные сырые измерения в файл
-    :return:
-    """
-    while True:
-        return
-
-
 async def get_one_spectrum(hyperion_x55_async):
     """
     Функция получает единичный спектр, используя класс hyperion.AsyncHyperion
@@ -1044,25 +1063,6 @@ async def get_one_spectrum(hyperion_x55_async):
               'spectrum', spectrum.header.serial_number, raw_peaks)
 
         await asyncio.sleep(one_spectrum_interval_sec)
-
-
-'''
-async def clock_sync():
-    clock_sync_interval_sec = 3600
-    while h1.get_is_ready():
-        await asyncio.sleep(asyncio_pause_sec)
-    last_sync_time = 0
-    while True:
-        await asyncio.sleep(asyncio_pause_sec)
-        cur_time = datetime.datetime.now().timestamp()
-        if h1.is_ready and cur_time - last_sync_time > clock_sync_interval_sec:
-            try:
-                await h1.set_instrument_utc_date_time(datetime.datetime.utcnow())
-            except Exception as e:
-                logging.debug(f'Some error during h1.set_instrument_utc_date_time - exception: {e.__doc__}')
-            finally:
-                last_sync_time = cur_time
-'''
 
 
 async def save_spectrum():
@@ -1161,15 +1161,16 @@ async def heart_rate():
         # restart current coroutine
         loop.create_task(heart_rate())
 
+
 def getFileProperties(fname):
     """
     Read all properties of the given file return them as a dictionary.
     https://stackoverflow.com/questions/580924/how-to-access-a-files-properties-on-windows
     """
     propNames = ('Comments', 'InternalName', 'ProductName',
-        'CompanyName', 'LegalCopyright', 'ProductVersion',
-        'FileDescription', 'LegalTrademarks', 'PrivateBuild',
-        'FileVersion', 'OriginalFilename', 'SpecialBuild')
+                 'CompanyName', 'LegalCopyright', 'ProductVersion',
+                 'FileDescription', 'LegalTrademarks', 'PrivateBuild',
+                 'FileVersion', 'OriginalFilename', 'SpecialBuild')
 
     props = {'FixedFileInfo': None, 'StringFileInfo': None, 'FileVersion': None}
 
@@ -1178,8 +1179,8 @@ def getFileProperties(fname):
         fixedInfo = win32api.GetFileVersionInfo(fname, '\\')
         props['FixedFileInfo'] = fixedInfo
         props['FileVersion'] = "%d.%d.%d.%d" % (fixedInfo['FileVersionMS'] / 65536,
-                fixedInfo['FileVersionMS'] % 65536, fixedInfo['FileVersionLS'] / 65536,
-                fixedInfo['FileVersionLS'] % 65536)
+                                                fixedInfo['FileVersionMS'] % 65536, fixedInfo['FileVersionLS'] / 65536,
+                                                fixedInfo['FileVersionLS'] % 65536)
 
         # \VarFileInfo\Translation returns list of available (language, codepage)
         # pairs that can be used to retreive string info. We are using only the first pair.
@@ -1199,6 +1200,7 @@ def getFileProperties(fname):
         pass
 
     return props
+
 
 if __name__ == "__main__":
     log_file_name = datetime.datetime.now().strftime('UPK_server_%Y%m%d%H%M%S.log')
@@ -1264,6 +1266,17 @@ if __name__ == "__main__":
         else:
             logging.info('Loaded instrument description ' + json.dumps(instrument_description))
 
-        loop.create_task(instrument_init())
+        # проверка поступившего задания - если оно валидно, то данное соединение будет мастером
+        logging.info("Checking the instrument description...")
+        try:
+            validate_instrument_description(instrument_description)
+        except NameError as e:
+            # wrong instrument description
+            logging.error(e)
+        except ConnectionError as e:
+            # no connection with ITO
+            logging.error(e)
+        else:
+            loop.create_task(instrument_init())
 
     loop.run_forever()
