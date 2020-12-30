@@ -139,12 +139,15 @@ def validate_instrument_description(loc_instrument_description):
     # проверка наличия важных полей
     for field in important_fields:
         if field not in loc_instrument_description:
-            raise NameError(f'no "{field}" field in instrument description')
+            raise NameError(f'no field "{field}" in instrument description')
 
     for device in loc_instrument_description['devices']:
         for field in device_important_fields:
             if field not in device:
-                raise NameError(f'no "{field}" field in device {device["Name"]}')
+                raise NameError(f'no field "{field}" in device {device["Name"]}')
+
+    if not isinstance(loc_instrument_description['IP_address'], str):
+        loc_instrument_description['IP_address'] = loc_instrument_description['IP_address'][0]
 
     # распарсить DetectionSettings в dict(), если не было сделано до этого
     ds = dict()
@@ -377,10 +380,8 @@ async def instrument_init():
         active_channels.add(int(device.channel))
 
     instrument_ip = instrument_description['IP_address']
-    if not isinstance(instrument_ip, str):
-        instrument_ip = instrument_ip[0]
 
-    # проверяем готовность прибора
+    # пингуем прибор перед подключением
     with socket.socket() as s:
         s.settimeout(1)
         instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
@@ -390,20 +391,6 @@ async def instrument_init():
             return_error('command port is not active on ip ' + instrument_ip)
             pass
 
-    """
-    # соединяемся с x55
-    h1 = hyperion.Hyperion(instrument_ip)
-    while not h1:
-        try:
-            h1 = hyperion.Hyperion(instrument_ip)
-        except hyperion.HyperionError as e:
-            return_error(e.__doc__)
-            return None
-    while not h1.is_ready:
-        await asyncio.sleep(asyncio_pause_sec)
-        pass
-    logging.info('x55 is ready, sn', h1.serial_number)
-    """
     h1 = hyperion.AsyncHyperion(instrument_ip, loop)
     logging.info(f'Instrument {await h1.get_instrument_name()} connected')
 
@@ -426,7 +413,7 @@ async def instrument_init():
         logging.error(f"Error during time setting :{e}")
 
     # применение настроек PeakDetection
-    if 0:
+    if 1:
         logging.info(f'Applying DetectionSettings')
         ds = instrument_description['DetectionSettings']
         for (key, value) in ds.items():
@@ -434,11 +421,22 @@ async def instrument_init():
 
             # пользовательские настройки
             desired_ds = hyperion.HPeakDetectionSettings(*value)
-            logging.info(f'Channel {channel}, settings :{desired_ds.pack()}')
+            logging.info(f'Applying channel {channel}, settings :{desired_ds.pack()}')
 
-            await h1.set_channel_detection_setting_id(channel, 128)
+            # await h1.set_channel_detection_setting_id(channel, 128)
             # сначала удалить,...
-            await h1.remove_detection_setting(desired_ds.setting_id)
+            # await h1.remove_detection_setting(desired_ds.setting_id)
+
+            try:
+                await h1.get_detection_setting(desired_ds.setting_id)
+            except Exception as e:
+                # no setting with this id
+                t = 2
+            else:
+                # this setting_id is already exist
+                for channel in range(1, 1 + await h1.get_channel_count()):
+                    if (await h1.get_channel_detection_setting(channel)) == desired_ds.setting_id:
+                        await h1.set_channel_detection_setting_id(channel, 128)
 
             # ... а потом записать настройки в память прибора
             await h1.add_or_update_detection_setting(desired_ds)
@@ -446,15 +444,10 @@ async def instrument_init():
             # применение настроек для текущего канала
             await h1.set_channel_detection_setting_id(channel, desired_ds.setting_id)
 
-            """
             # проверим что записалось
             actual_ds = await h1.get_channel_detection_setting(channel)
+            logging.info(f'Channel {channel}, settings :{desired_ds.pack()}')
 
-            if actual_ds.pack() == desired_ds.pack():
-                print(channel, actual_ds.pack())
-            else:
-                print('wrong')
-            """
 
     # запускаем процедуру периодического получения спектра
     # await get_one_spectrum(h1)
