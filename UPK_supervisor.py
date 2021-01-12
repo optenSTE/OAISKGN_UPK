@@ -47,6 +47,8 @@ dir_check_interval_sec = 60
 ; how many low speed triggers released before service restarts, default 5
 num_of_triggers_before_action = 5
 
+; how often ITO should be rebooted (0 - never, 1 - every service restart, 2 - every second service restart and so on), default 2
+num_of_service_restarts_before_ito_reboot = 0
 
 
 ;*********************************
@@ -73,7 +75,7 @@ import random
 import win32api
 import configparser
 
-program_version = '25122020'
+program_version = '12012021'
 
 # Глобальные переменные
 files_template = '*.txt'  # шаблон имени файла для подсчета размера папки
@@ -82,9 +84,9 @@ ITO_rebooting_duration_sec = 40  # время перезагрузки приб�
 win_service_restart_pause = 10  # пауза при перезапуске службы
 
 
-def get_dir_size_bytes():
+def get_dir_size_bytes(template):
     total_size = 0
-    for file_name in glob.glob(files_template):
+    for file_name in glob.glob(template):
         file_size = os.path.getsize(file_name)
         total_size += file_size
     return total_size
@@ -172,18 +174,22 @@ def action_when_trigger_released(ITO_reboot=False):
 
                         logging.info(f'Current ITO time {h1.instrument_utc_date_time.strftime("%d.%m.%Y %H:%M:%S")}')
 
+                        logging.info(f"Pause for {win_service_restart_pause}sec")
+                        time.sleep(win_service_restart_pause)
+
                     except Exception as e:
                         logging.debug(f'Some error during h1.instrument_utc_date_time - exception: {e.__doc__}')
 
                     try:
                         logging.info(f'Rebooting ITO...')
                         h1.reboot()
+
+                        logging.info(f"Pause for {ITO_rebooting_duration_sec}sec")
+                        time.sleep(ITO_rebooting_duration_sec)
+                        logging.info(f"Instrument {h1.instrument_name}, ip {instrument_ip} rebooted")
+
                     except Exception as e:
                         logging.error(f'An exception happened: {e.__doc__}')
-
-                    logging.info(f"Pause for {ITO_rebooting_duration_sec}sec")
-                    time.sleep(ITO_rebooting_duration_sec)
-                    logging.info(f"Instrument {h1.instrument_name}, ip {instrument_ip} rebooted")
 
     try:
         # start the service
@@ -202,8 +208,9 @@ if __name__ == "__main__":
     dir_size_speed_threshold_mb_per_h = 8  # минимальная скорость прироста размера папки, при которой не будет перезапускаться служба
     service_name = "OAISKGN_UPK"  # имя службы для перезапуска
     dir_check_interval_sec = 60  # интервал проверки
-    num_of_triggers_before_action = 5  # количество срабатываний триггера до реальных действий
+    num_of_triggers_before_action = 5  # количество срабатываний триггера до перезапуска службы
     win_service_restart_interval_sec = 3600  # интервал безусловной перезагрузки службы
+    num_of_service_restarts_before_ito_reboot = 0  # количество перезапусков службы до перезагрузки прибора
 
     try:
         filename, file_extension = os.path.splitext(sys.argv[0])
@@ -225,7 +232,8 @@ if __name__ == "__main__":
         dir_size_speed_threshold_mb_per_h = float(config['trigger1']['dir_size_speed_threshold_mb_per_h'])
         service_name = config['trigger1']['service_name']
         dir_check_interval_sec = float(config['trigger1']['dir_check_interval_sec'])
-        num_of_triggers_before_action = float(config['trigger1']['num_of_triggers_before_action'])
+        num_of_triggers_before_action = int(config['trigger1']['num_of_triggers_before_action'])
+        num_of_service_restarts_before_ito_reboot = int(config['trigger1']['num_of_service_restarts_before_ito_reboot'])
 
         win_service_restart_interval_sec = float(config['trigger2']['win_service_restart_interval_sec'])
 
@@ -256,7 +264,8 @@ if __name__ == "__main__":
     logging.info(f'dir_size_speed_threshold_mb_per_h={dir_size_speed_threshold_mb_per_h}, '
                  f'service_name={service_name}, dir_check_interval_sec={dir_check_interval_sec}, '
                  f'num_of_triggers_before_action={num_of_triggers_before_action}, '
-                 f'win_service_restart_interval_sec={win_service_restart_interval_sec}')
+                 f'win_service_restart_interval_sec={win_service_restart_interval_sec}, '
+                 f'num_of_service_restarts_before_ito_reboot={num_of_service_restarts_before_ito_reboot} ')
 
     # случайная добавка к интервалу перезагрузки - чтобы не было в одно и то же время
     win_service_restart_interval_sec += random.randint(-int(win_service_restart_interval_sec / 8),
@@ -269,7 +278,7 @@ if __name__ == "__main__":
     last_dir_size = 0
     cur_num_of_triggers = 0
 
-    ITO_reboot_next_time = False
+    num_of_service_restarts = 0
 
     logging.info(f'Looking for instrument description file {instrument_description_filename}...')
     instrument_ip = None
@@ -305,11 +314,13 @@ if __name__ == "__main__":
                                                                    int(win_service_restart_interval_sec / 8))
 
                 action_when_trigger_released()
+                cur_num_of_triggers = 0
+                num_of_service_restarts = 0
 
         # перезагрузка по скорости наполнения папки с данными
         try:
             cur_time = datetime.datetime.now().timestamp()
-            cur_dir_size = get_dir_size_bytes()
+            cur_dir_size = get_dir_size_bytes(data_dir_path + '\\' + files_template)
             if (cur_time - last_dir_check_time) >= dir_check_interval_sec:
 
                 time_diff_sec = cur_time - last_dir_check_time
@@ -328,12 +339,15 @@ if __name__ == "__main__":
 
                     cur_num_of_triggers += 1
                     if cur_num_of_triggers >= num_of_triggers_before_action:
-                        # print('Action!')
-                        logging.info('Action!')
                         cur_num_of_triggers = 0
 
-                        action_when_trigger_released(ITO_reboot_next_time)
-                        ITO_reboot_next_time = not ITO_reboot_next_time
+                        ITO_reboot_now = False
+                        if num_of_service_restarts >= num_of_service_restarts_before_ito_reboot > 0:
+                            num_of_service_restarts = 0
+                            ITO_reboot_now = True
+
+                        action_when_trigger_released(ITO_reboot_now)
+                        num_of_service_restarts += 1
                 else:
                     logging.info('Speed %.1fMb/h is ok' % cur_speed_mb_per_h)
 
