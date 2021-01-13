@@ -71,11 +71,10 @@ import sys
 import json
 from pathlib import Path
 import socket
-import random
 import win32api
 import configparser
 
-program_version = '12012021'
+program_version = '13012021'
 
 # Глобальные переменные
 files_template = '*.txt'  # шаблон имени файла для подсчета размера папки
@@ -267,10 +266,6 @@ if __name__ == "__main__":
                  f'win_service_restart_interval_sec={win_service_restart_interval_sec}, '
                  f'num_of_service_restarts_before_ito_reboot={num_of_service_restarts_before_ito_reboot} ')
 
-    # случайная добавка к интервалу перезагрузки - чтобы не было в одно и то же время
-    win_service_restart_interval_sec += random.randint(-int(win_service_restart_interval_sec / 8),
-                                                       int(win_service_restart_interval_sec / 8))
-
     last_dir_check_time = datetime.datetime.now().timestamp()
     last_unconditional_reboot_time = datetime.datetime.now().timestamp()
     cur_time = 0
@@ -309,10 +304,6 @@ if __name__ == "__main__":
 
                 last_unconditional_reboot_time = cur_time
 
-                # случайная добавка к интервалу перезагрузки - чтобы не было в одно и то же время
-                win_service_restart_interval_sec += random.randint(-int(win_service_restart_interval_sec / 8),
-                                                                   int(win_service_restart_interval_sec / 8))
-
                 action_when_trigger_released()
                 cur_num_of_triggers = 0
                 num_of_service_restarts = 0
@@ -349,7 +340,7 @@ if __name__ == "__main__":
                         action_when_trigger_released(ITO_reboot_now)
                         num_of_service_restarts += 1
                 else:
-                    logging.info('Speed %.1fMb/h is ok' % cur_speed_mb_per_h)
+                    logging.info('Speed %.3fMb/h is ok' % cur_speed_mb_per_h)
 
             sleeping_time = dir_check_interval_sec - (cur_time - last_dir_check_time)
             if sleeping_time < 0 or sleeping_time > dir_check_interval_sec:
