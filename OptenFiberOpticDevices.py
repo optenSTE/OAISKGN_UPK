@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# v12012021
 import math
 import copy
 
@@ -69,6 +70,18 @@ class ODTiT:
         self.t_max = 60.0  # максимальная эксплутационная температура, С
 
         self.time_of_flight = 0  # Задержка распространения света в волокне от Прибора до первой решетки Измерителя и обратно
+        self.distance = 0  # оптическое расстояние до устройства, м
+        '''
+        sol_poly_k0, _k1, _k2 - коэффициенты полинома компенсации длины волны за задержку распространения света
+        wl_shift[nm] = wl_compensated[nm] - wl[nm] =  dist[m] * ( k2*wl[nm]^2 + k1*wl[nm] + k0)
+            dist - расстояние, м
+            wl - измеренная длина волны, пм
+            wl_comp - длина волны с учетом компенсации
+        УПК Газовая - sol_poly=(-8.19436E-04, 1.06632E-06, -3.29350E-10)
+        '''
+        self.sol_poly_k0 = 0
+        self.sol_poly_k1 = 0
+        self.sol_poly_k2 = 0
 
         self.sensors = []  # три решетки - температурная, натяжная левая, натяжная правая
         for i in range(3):
@@ -78,7 +91,7 @@ class ODTiT:
         print_str = 'ODTiT device: %s\t%s\t%s\t%s' % (self.name, self.sensors[1].__str__(), self.sensors[2].__str__(), self.sensors[0].__str__())
         return print_str
 
-    def find_yours_wls(self, wls_pm, channel=None, t_recommended=None, delete_founded_peaks=True):
+    def find_yours_wls(self, wls_pm, channel=None, t_recommended=None, delete_founded_peaks=True, apply_sol = False):
         """Function checks is this wavelength belongs of
             this ODTiT device (any of optical sensor)
         :param wls_pm: list(), список длин волн пиков, пм - после выполнения функции из него будут удалены найденные пики
@@ -91,6 +104,8 @@ class ODTiT:
         ret_value = [None, None, None]
 
         wls_local = copy.deepcopy(wls_pm)
+        if apply_sol:
+            wls_local = self.__apply_sol(wls_local)
 
         cur_t = None
         for sensor_num, sensor in enumerate(self.sensors):
@@ -103,8 +118,9 @@ class ODTiT:
             else:
                 param = [[sensor_num, cur_t, self.f_min - self.f_reserve], [sensor_num, cur_t, self.f_max + self.f_reserve], [sensor_num, cur_t, (self.f_min + self.f_max)/2]]  # для натяжной нет рекомендованной длины волны
 
-            wl_min = min(self._get_wl_from_value(*param[0]), self._get_wl_from_value(*param[1]))
-            wl_max = max(self._get_wl_from_value(*param[0]), self._get_wl_from_value(*param[1]))
+            wls = (self._get_wl_from_value(*param[0]), self._get_wl_from_value(*param[1]))
+            wl_min = min(wls)
+            wl_max = max(wls)
             wl_recommended = self._get_wl_from_value(*param[2])
 
             candidates = []
@@ -145,19 +161,23 @@ class ODTiT:
 
         return ret_value
 
-    def is_wl_of_temperature_sensor(self, wl_pm, channel=0):
+    def is_wl_of_temperature_sensor(self, wl, channel=0, apply_sol=False):
         """Function checks is this wavelength belongs of
             this ODTiT device (temperature optical sensor)
-        :param wl_pm: wavelength, pm
+        :param wl: wavelength, pm
         :param channel: channel num for MOI si255
         :return: is the wavelength belongs of this ODTiT device
         """
+
+        # apply SoL compensation
+        if apply_sol:
+            wl = self.__apply_sol(wl)
 
         wl_max = self.sensors[0].wl0 * (1 + (self.t_max - self.sensors[0].t0) * self.sensors[0].st)
         wl_min = self.sensors[0].wl0 * (1 + (self.t_min - self.sensors[0].t0) * self.sensors[0].st)
 
         ret_value = False
-        if min(wl_min, wl_max) <= wl_pm <= max(wl_min, wl_max):
+        if min(wl_min, wl_max) <= wl <= max(wl_min, wl_max):
             ret_value = True
 
         if 0 < self.channel != channel:
@@ -165,7 +185,7 @@ class ODTiT:
 
         return ret_value
 
-    def is_wl_of_strain_sensor(self, wl, t, sensor_num, channel=0):
+    def is_wl_of_strain_sensor(self, wl, t, sensor_num, channel=0, apply_sol=False):
         """For strain sensors os3110 checks is given WL belongs of this ODTiT device
         :param wl: measured strain sensor's wavelength, pm
         :param t: ODTiT device temperature, degC (by os4100 sensor)
@@ -173,6 +193,10 @@ class ODTiT:
         :param channel: channel num for strain sensor, only for MIO instruments
         :return: is the wavelength belongs of this ODTiT device
         """
+
+        # apply SoL compensation
+        if apply_sol:
+            wl = self.__apply_sol(wl)
 
         if 1 < sensor_num > 2:
             raise IndentationError('Sensor_num should be 1 or 2')
@@ -193,30 +217,44 @@ class ODTiT:
 
         return ret_value
 
-    def get_temperature(self, wl_temperature_sensor):
+    def get_temperature(self, wl_temperature_sensor, apply_sol=False):
+
+        # apply SoL compensation
+        if apply_sol:
+            wl_temperature_sensor = self.__apply_sol(wl_temperature_sensor)
+
         return self.sensors[0].get_temperature(wl_temperature_sensor)
 
-    def get_tension_fav(self, wl_tension_sensor_1, wl_tension_sensor_2, wl_temperature_sensor):
-        return self.get_tension_fav_ex(wl_tension_sensor_1, wl_tension_sensor_2, wl_temperature_sensor)[0]
+    def get_tension_fav(self, wl_tension_sensor_1, wl_tension_sensor_2, wl_temperature_sensor, apply_sol=False):
+        return self.get_tension_fav_ex(wl_tension_sensor_1, wl_tension_sensor_2, wl_temperature_sensor, apply_sol)[0]
 
-    def _get_wl_from_value(self, sensor_num, temperature, force=0):
+    def _get_wl_from_value(self, sensor_num, temperature, force=0, apply_sol=False):
         '''
         :param sensor_num: int(), номер сенсора 0 - температурный, 1 и 2 - натяжной
         :param temperature: float(), температура
         :param force: float(), сила [даН] (для натяжных решеток)
         :return: float(), длина волны, соответствующая заданным условиям
         '''
+
         if sensor_num == 0:
-            return self.sensors[0].wl0 * (1 + (temperature - self.sensors[0].t0) * self.sensors[0].st)
+            ret_value = self.sensors[0].wl0 * (1 + (temperature - self.sensors[0].t0) * self.sensors[0].st)
         else:
             # WL = WL_0 * (1 + ((f1 * 10 / (E * S) - (T - Ts1_0) * (CTET - CTES) / 1000000) * FG + (T - Tt_0) * ST));
-            return self.sensors[sensor_num].wl0 * (1 + (((force - self.f_reserve) * 10 / (self.e * self.size[0] * self.size[1] * 1E-6) - (temperature - self.sensors[sensor_num].t0) * (
+            ret_value = self.sensors[sensor_num].wl0 * (1 + (((force - self.f_reserve) * 10 / (self.e * self.size[0] * self.size[1] * 1E-6) - (temperature - self.sensors[sensor_num].t0) * (
                     self.sensors[sensor_num].ctet - self.ctes) / 1E+6) * self.sensors[sensor_num].fg + (temperature - self.sensors[0].t0) * self.sensors[0].st))
 
+        if apply_sol:
+            self.__apply_sol(ret_value, True)
+        return ret_value
+
     def get_tension_fav_ex(self, wl_tension_sensor_1, wl_tension_sensor_2,
-                           wl_temperature_sensor, return_nan=False):
+                           wl_temperature_sensor, return_nan=False, apply_sol=False):
 
         ret_value = dict()
+
+        # apply SoL compensation
+        if apply_sol:
+            wl_tension_sensor_1, wl_tension_sensor_2, wl_temperature_sensor = [self.__apply_sol(wl) for wl in [wl_tension_sensor_1, wl_tension_sensor_2, wl_temperature_sensor]]
 
         ret_value.setdefault('T_degC', None)
         ret_value.setdefault('eps1_ustr', None)
@@ -260,5 +298,26 @@ class ODTiT:
             ret_value['Fav_N'] = (f1 + f2) / 2
             ret_value['Fbend_N'] = (eps1 - eps2) / (2 * self.bend_sens)
             ret_value['Ice_mm'] = ice_mm
+
+        return ret_value
+
+    def __apply_sol(self, wls, back_apply=False):
+        """
+        Compensate SoL shift to raw wl
+        :param wls: raw wls [nm], list
+        :param back_apply: back compensation (wl_out > wl_in)
+        :return: compensated wls [nm], list
+        """
+        ret_value = list()
+        for wl in wls:
+            wl_shift = self.distance * (self.sol_poly_k2 * wl * wl + self.sol_poly_k1 * wl + self.sol_poly_k0)
+            if back_apply:
+                ret_value.append(wl_shift - wl)
+            else:
+                ret_value.append(wl + wl_shift)
+
+        # if list contains one one wl, then return float
+        if len(ret_value) == 1:
+            ret_value = ret_value[0]
 
         return ret_value
