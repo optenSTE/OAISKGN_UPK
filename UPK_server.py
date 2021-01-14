@@ -14,15 +14,13 @@ from pathlib import Path
 import statistics
 import re
 import win32api
-import os
-import struct
 
 # Настроечные переменные
 hostname = socket.gethostname()
 # address, port = socket.gethostbyname(hostname), 7681  # адрес websocket-сервера
 index_of_reflection = 1.4682
 speed_of_light = 299792458.0
-program_version = '29122020'
+program_version = '20201225'
 output_measurements_order2 = ['T_degC', 'Fav_N', 'Fbend_N', 'Ice_mm']  # последовательность выдачи данных
 DEFAULT_TIMEOUT = 10000
 instrument_description_filename = 'instrument_description.json'
@@ -45,6 +43,7 @@ instrument_description = dict()
 h1 = None
 active_channels = set()
 devices = list()
+save_raw_measurements = False
 
 # хранение длин волн
 wavelengths_buffer = dict()
@@ -120,73 +119,49 @@ queue = asyncio.Queue(maxsize=0, loop=loop)
 peak_stream = None
 
 
-def validate_instrument_description(loc_instrument_description):
-    """
-    :param loc_instrument_description: dict() - what should be checked
-            if key 'DetectionSettings' is str, it converts to dict('ch_num': [Name, Description, Boxcar (pm), Diff (pm), Lockout (pm), NTV (pm), Threshold, Mode])
-    :return: no return
-    Raises NameError exception if wrong format or ConnectionError if ito doesn't answer
-    """
-    ip_template = re.compile(
-        "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$")
-    important_fields = ['version', 'IP_address', 'SampleRate', 'devices', 'DetectionSettings', 'DateTime']
-    device_important_fields = ['version', 'Sensor3110_1', 'Sensor3110_2', 'Sensor4100', 'x55_channel', 'CTES',
-                               'E', 'Asize', 'Bsize', 'Tmin', 'Tmax', 'Fmin', 'Fmax', 'Freserve', 'Bending_sensivity']
+def valid_instrument_description(loc_instrument_description):
+    ip_template = re.compile("^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$")
+    important_fields = ['version', 'IP_address', 'SampleRate', 'devices']
+    device_important_fields = {'version', 'Sensor3110_1', 'Sensor3110_2', 'Sensor4100', 'x55_channel', 'CTES',
+                               'E', 'Asize', 'Bsize', 'Tmin', 'Tmax', 'Fmin', 'Fmax', 'Freserve', 'Bending_sensivity',
+                               'Distance'}
 
-    if not isinstance(loc_instrument_description, dict):
-        raise NameError(f'wrong format of instrument description: {loc_instrument_description}')
+    try:
+        if not isinstance(loc_instrument_description, dict):
+            return False
 
-    # проверка наличия важных полей
-    for field in important_fields:
-        if field not in loc_instrument_description:
-            raise NameError(f'no field "{field}" in instrument description')
+        # проверка наличия важных полей
+        for field in important_fields:
+            if field not in loc_instrument_description:
+                logging.error(f'no "{field}" field in instrument description')
+                return False
+        for device in loc_instrument_description['devices']:
+            for field in device_important_fields:
+                if field not in device:
+                    logging.error(f'no "{field}" field in device {device["Name"]}')
+                    return False
 
-    for device in loc_instrument_description['devices']:
-        for field in device_important_fields:
-            if field not in device:
-                raise NameError(f'no field "{field}" in device {device["Name"]}')
+        # проверка IP по шаблону
+        if not re.match(ip_template, loc_instrument_description['IP_address']):
+            logging.error(f'incorrect IP address')
+            return False
 
-    if not isinstance(loc_instrument_description['IP_address'], str):
-        loc_instrument_description['IP_address'] = loc_instrument_description['IP_address'][0]
+        # проверяем готовность прибора
+        instrument_ip = loc_instrument_description['IP_address']
+        with socket.socket() as s:
+            s.settimeout(1)
+            instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
+            try:
+                s.connect(instrument_address)
+            except socket.error:
+                return_error(f'command port is not active on ip {instrument_ip}')
+                return False
 
-    # распарсить DetectionSettings в dict(), если не было сделано до этого
-    ds = dict()
-    if isinstance(loc_instrument_description['DetectionSettings'], str):
-        try:
-            ch = 0
-            for k in loc_instrument_description['DetectionSettings'].split(', '):
-                if '!' in k:
-                    ch = k.replace('!', '')
-                    ds.setdefault(ch, [int(ch)])
-                else:
-                    # все что возможно, переводим в int
-                    try:
-                        k = int(k)
-                    except:
-                        pass
-                    finally:
-                        ds[ch].append(k)
+    except Exception as e:
+        logging.error(f'some exception during check instrument description: {e.__doc__}')
+        return False
 
-        except Exception as e:
-            raise NameError(
-                f'wrong DetectionSettings format, should be like "3!, name, disc, 250, 250, 0, 10000, 15000, Peak, 4!, name, disc, 250, 250, 0, 10000, 6000, Peak"')
-        loc_instrument_description['DetectionSettings'] = ds
-
-    # проверка IP по шаблону
-    if not re.match(ip_template, loc_instrument_description['IP_address']):
-        raise NameError(f'incorrect IP address')
-
-    # проверяем готовность прибора
-    instrument_ip = loc_instrument_description['IP_address']
-    with socket.socket() as s:
-        s.settimeout(1)
-        instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
-        try:
-            s.connect(instrument_address)
-        except socket.error:
-            raise ConnectionError(f'command port is not active {instrument_ip}:{hyperion.COMMAND_PORT}')
-
-    return ds
+    return True
 
 
 async def connection_handler(connection, path):
@@ -202,32 +177,23 @@ async def connection_handler(connection, path):
             msg = await connection.recv()
         except websockets.exceptions.WebSocketException as e:
             # текущее соединение закрыто
-            logging.info(
-                f'There is no connection while receiving data - websockets.exceptions.WebSocketException, {str(e.args)}')
+            logging.info(f'There is no connection while receiving data - websockets.exceptions.WebSocketException, {str(e.args)}')
             break
 
         logging.info(f"Received a message: {msg}")
 
-        msg1 = msg.replace("\'", "\"")
         json_msg = dict()
         try:
-            json_msg = json.loads(msg1)
-        except json.JSONDecodeError as e:
-            logging.critical(f'wrong JSON message has been refused, error {e}')
+            json_msg = json.loads(msg.replace("\'", "\""))
+        except json.JSONDecodeError:
+            logging.info('wrong JSON message has been refused')
             json_msg.clear()
-            break
+            continue
 
         # проверка поступившего задания - если оно валидно, то данное соединение будет мастером
         logging.info("Checking the instrument description...")
-        try:
-            validate_instrument_description(json_msg)
-        except NameError as e:
-            # wrong instrument description
-            logging.error(e)
-            break
-        except ConnectionError as e:
-            # no connection with ITO
-            logging.error(e)
+        if not valid_instrument_description(json_msg):
+            logging.error('not valid instrument description, refuse current connection')
             break
 
         logging.info('it is ok - current connection become the master')
@@ -247,9 +213,7 @@ async def connection_handler(connection, path):
         if Path(instrument_description_filename).is_file():
             # file exists
             try:
-                new_instrument_description_filename = os.path.splitext(instrument_description_filename)[
-                                                          0] + datetime.datetime.now().strftime(
-                    '_before_%Y%m%d%H%M%S') + os.path.splitext(instrument_description_filename)[1]
+                new_instrument_description_filename = os.path.splitext(instrument_description_filename)[0] + datetime.datetime.now().strftime('_before_%Y%m%d%H%M%S') + os.path.splitext(instrument_description_filename)[1]
                 os.rename(instrument_description_filename, new_instrument_description_filename)
             finally:
                 pass
@@ -303,9 +267,7 @@ async def instrument_init():
         # ToDo перенести это в класс ODTiT
         device = None
         try:
-            if device_description['version'] == '0.1' \
-                    or device_description['version'] == '0.2' \
-                    or device_description['version'] == '0.3':
+            if device_description['version'] == '0.1' or device_description['version'] == '0.2' or device_description['version'] == '0.3':
                 device = ODTiT(device_description['x55_channel'])
                 device.id = device_description['ID']
                 device.name = device_description['Name']
@@ -325,6 +287,8 @@ async def instrument_init():
                 device.bend_sens = device_description['Bending_sensivity']
                 device.time_of_flight = int(
                     -2E9 * device_description['Distance'] * index_of_reflection / speed_of_light)
+
+                device.distance = device_description['Distance']
 
                 device.sensors[0].id = device_description['Sensor4100']['ID']
                 device.sensors[0].type = device_description['Sensor4100']['type']
@@ -362,6 +326,10 @@ async def instrument_init():
                 device.icemodel_i1 = device_description['ICEmodel_I1']
                 device.icemodel_i2 = device_description['ICEmodel_I2']
 
+                if len(device_description['x55_SoL_compensation']) > 6:
+                    device.sol_poly_k2, device.sol_poly_k1, device.sol_poly_k0 = \
+                        [float(k) for k in device_description['x55_SoL_compensation'].split(', ')]
+
         except KeyError as e:
             return_error(f'JSON error - key {str(e)} did not find')
 
@@ -380,8 +348,10 @@ async def instrument_init():
         active_channels.add(int(device.channel))
 
     instrument_ip = instrument_description['IP_address']
+    if not isinstance(instrument_ip, str):
+        instrument_ip = instrument_ip[0]
 
-    # пингуем прибор перед подключением
+    # проверяем готовность прибора
     with socket.socket() as s:
         s.settimeout(1)
         instrument_address = (instrument_ip, hyperion.COMMAND_PORT)
@@ -391,64 +361,44 @@ async def instrument_init():
             return_error('command port is not active on ip ' + instrument_ip)
             pass
 
+    """
+    # соединяемся с x55
+    h1 = hyperion.Hyperion(instrument_ip)
+    while not h1:
+        try:
+            h1 = hyperion.Hyperion(instrument_ip)
+        except hyperion.HyperionError as e:
+            return_error(e.__doc__)
+            return None
+    while not h1.is_ready:
+        await asyncio.sleep(asyncio_pause_sec)
+        pass
+    logging.info('x55 is ready, sn', h1.serial_number)
+    """
     h1 = hyperion.AsyncHyperion(instrument_ip, loop)
+
+    """
+    # разбор задания
+    if len(instrument_description['DetectionSettings']) < 5:
+        'setting_id, name, description, boxcar_length, diff_filter_length, lockout, ntv_period, threshold, mode'
+        instrument_description['DetectionSettings'] = '1\tname\tdecription\t249\t250\t1\t1000\t16001\t1'
+    detection_settings_list = instrument_description['DetectionSettings'].split('\t')
+    my_ds = hyperion.HPeakDetectionSettings(*detection_settings_list)
+    print('Detection settings:\nChannel setting_id name description boxcar_length diff_filter_length lockout ntv_period threshold mode')
+    for channel in active_channels:
+        # пользовательские настройки
+        my_ds = hyperion.HPeakDetectionSettings(2, 'my ds', 'descr', 249, 250, 1, 1000, 16001)
+        # запись настроек в память прибора
+        # ToDo добавить проверку наличия настроек с таким id - если их нет, то нужно Add, а не Update
+        await h1._execute_command('#UpdateDetectionSetting', my_ds.pack())
+        # применение настроек для текущего канала
+        await h1.set_channel_detection_setting_id(channel, my_ds.setting_id)
+        # проверим что записалось
+        detection_settings_ids = await h1.get_channel_detection_setting_ids()
+        ds = await h1.get_detection_setting(detection_settings_ids[channel-1])
+        print(channel, ds.setting_id, ds.name, ds.description, ds.boxcar_length, ds.diff_filter_length, ds.lockout, ds.ntv_period, ds.threshold, ds.mode)
+    """
     logging.info(f'Instrument {await h1.get_instrument_name()} connected')
-
-    # настройка времени прибора
-    try:
-        ito_datetime = await h1._execute_command('#GetInstrumentUtcDateTime')
-        ito_datetime = struct.unpack_from('HHHHHH', ito_datetime.content)
-        logging.info(f'Current ITO time :{ito_datetime}')
-
-        logging.info(f'Setting ITO datetime to {instrument_description["DateTime"]}')
-
-        osm_datetime = datetime.datetime.strptime(instrument_description["DateTime"], "%Y %m %d %H %M %S")
-        await h1.set_instrument_utc_date_time(osm_datetime)
-
-        ito_datetime = await h1._execute_command('#GetInstrumentUtcDateTime')
-        ito_datetime = struct.unpack_from('HHHHHH', ito_datetime.content)
-        logging.info(f'New ITO time :{ito_datetime}')
-
-    except Exception as e:
-        logging.error(f"Error during time setting :{e}")
-
-    # применение настроек PeakDetection
-    if 1:
-        logging.info(f'Applying DetectionSettings')
-        ds = instrument_description['DetectionSettings']
-        for (key, value) in ds.items():
-            channel = int(key)
-
-            # пользовательские настройки
-            desired_ds = hyperion.HPeakDetectionSettings(*value)
-            logging.info(f'Applying channel {channel}, settings :{desired_ds.pack()}')
-
-            # await h1.set_channel_detection_setting_id(channel, 128)
-            # сначала удалить,...
-            # await h1.remove_detection_setting(desired_ds.setting_id)
-
-            try:
-                await h1.get_detection_setting(desired_ds.setting_id)
-            except Exception as e:
-                # no setting with this id
-                t = 2
-            else:
-                # this setting_id is already exist
-                for channel in range(1, 1 + await h1.get_channel_count()):
-                    if (await h1.get_channel_detection_setting(channel)) == desired_ds.setting_id:
-                        await h1.set_channel_detection_setting_id(channel, 128)
-
-            # ... а потом записать настройки в память прибора
-            await h1.add_or_update_detection_setting(desired_ds)
-
-            # применение настроек для текущего канала
-            await h1.set_channel_detection_setting_id(channel, desired_ds.setting_id)
-
-            # проверим что записалось
-            actual_ds = await h1.get_channel_detection_setting(channel)
-            logging.info(f'Channel {channel}, settings :{desired_ds.pack()}')
-
-
     # запускаем процедуру периодического получения спектра
     # await get_one_spectrum(h1)
 
@@ -580,12 +530,13 @@ async def wls_to_measurements_coroutine():
 
                     # время усредненного блока, в которое попадает это измерение
                     averaged_block_time = measurement_time - measurement_time % (
-                            1 / instrument_description['SampleRate'])
+                                1 / instrument_description['SampleRate'])
                     np.append([averaged_block_time], np.zeros(len(output_measurements_order2)))
 
                     devices_output3 = [measurement_time] + [np.nan] * len(output_measurements_order2) * len(devices)
 
-                    raw_measurements_buffer_for_disk['data'][measurement_time] = [measurement_time]
+                    if save_raw_measurements:
+                        raw_measurements_buffer_for_disk['data'][measurement_time] = [measurement_time]
 
                     # переводим пики в пикометры
                     for channel, wls in peaks_by_channel.items():
@@ -614,18 +565,20 @@ async def wls_to_measurements_coroutine():
 
                             for field_num, filed in enumerate(output_measurements_order2):
                                 devices_output3[1 + device_num * len(output_measurements_order2) + field_num] = \
-                                    device_output[filed]
+                                device_output[filed]
 
-                            raw_measurements_buffer_for_disk['data'][measurement_time].append(device_output['F1_N'])
-                            raw_measurements_buffer_for_disk['data'][measurement_time].append(device_output['F2_N'])
+                            if save_raw_measurements:
+                                raw_measurements_buffer_for_disk['data'][measurement_time].append(device_output['F1_N'])
+                                raw_measurements_buffer_for_disk['data'][measurement_time].append(device_output['F2_N'])
                         else:
                             none_value = None
                             for field_num, filed in enumerate(output_measurements_order2):
                                 devices_output3[
                                     1 + device_num * len(output_measurements_order2) + field_num] = none_value
 
-                            raw_measurements_buffer_for_disk['data'][measurement_time].append(none_value)
-                            raw_measurements_buffer_for_disk['data'][measurement_time].append(none_value)
+                            if save_raw_measurements:
+                                raw_measurements_buffer_for_disk['data'][measurement_time].append(none_value)
+                                raw_measurements_buffer_for_disk['data'][measurement_time].append(none_value)
 
                     if len(devices_output3) > 1:
 
@@ -966,8 +919,7 @@ async def send_avg_measurements_coroutine():
                     try:
                         await master_connection.send(send_msg)
                     except websockets.exceptions.ConnectionClosed:
-                        logging.error(
-                            'No connection while sending data - websockets.exceptions.ConnectionClosed. Zerroing master_connection.')
+                        logging.error('No connection while sending data - websockets.exceptions.ConnectionClosed. Zerroing master_connection.')
                         master_connection = None
                     except Exception as e:
                         logging.error(f'Some error during measurements sending to OSM - exception: {e.__doc__}')
@@ -1014,6 +966,14 @@ async def send_avg_measurements_coroutine():
         loop.create_task(send_avg_measurements_coroutine())
 
 
+async def save_wls():
+    """ Функция записывает накопленные сырые измерения в файл
+    :return:
+    """
+    while True:
+        return
+
+
 async def get_one_spectrum(hyperion_x55_async):
     """
     Функция получает единичный спектр, используя класс hyperion.AsyncHyperion
@@ -1056,6 +1016,25 @@ async def get_one_spectrum(hyperion_x55_async):
               'spectrum', spectrum.header.serial_number, raw_peaks)
 
         await asyncio.sleep(one_spectrum_interval_sec)
+
+
+'''
+async def clock_sync():
+    clock_sync_interval_sec = 3600
+    while h1.get_is_ready():
+        await asyncio.sleep(asyncio_pause_sec)
+    last_sync_time = 0
+    while True:
+        await asyncio.sleep(asyncio_pause_sec)
+        cur_time = datetime.datetime.now().timestamp()
+        if h1.is_ready and cur_time - last_sync_time > clock_sync_interval_sec:
+            try:
+                await h1.set_instrument_utc_date_time(datetime.datetime.utcnow())
+            except Exception as e:
+                logging.debug(f'Some error during h1.set_instrument_utc_date_time - exception: {e.__doc__}')
+            finally:
+                last_sync_time = cur_time
+'''
 
 
 async def save_spectrum():
@@ -1154,16 +1133,15 @@ async def heart_rate():
         # restart current coroutine
         loop.create_task(heart_rate())
 
-
 def getFileProperties(fname):
     """
     Read all properties of the given file return them as a dictionary.
     https://stackoverflow.com/questions/580924/how-to-access-a-files-properties-on-windows
     """
     propNames = ('Comments', 'InternalName', 'ProductName',
-                 'CompanyName', 'LegalCopyright', 'ProductVersion',
-                 'FileDescription', 'LegalTrademarks', 'PrivateBuild',
-                 'FileVersion', 'OriginalFilename', 'SpecialBuild')
+        'CompanyName', 'LegalCopyright', 'ProductVersion',
+        'FileDescription', 'LegalTrademarks', 'PrivateBuild',
+        'FileVersion', 'OriginalFilename', 'SpecialBuild')
 
     props = {'FixedFileInfo': None, 'StringFileInfo': None, 'FileVersion': None}
 
@@ -1172,8 +1150,8 @@ def getFileProperties(fname):
         fixedInfo = win32api.GetFileVersionInfo(fname, '\\')
         props['FixedFileInfo'] = fixedInfo
         props['FileVersion'] = "%d.%d.%d.%d" % (fixedInfo['FileVersionMS'] / 65536,
-                                                fixedInfo['FileVersionMS'] % 65536, fixedInfo['FileVersionLS'] / 65536,
-                                                fixedInfo['FileVersionLS'] % 65536)
+                fixedInfo['FileVersionMS'] % 65536, fixedInfo['FileVersionLS'] / 65536,
+                fixedInfo['FileVersionLS'] % 65536)
 
         # \VarFileInfo\Translation returns list of available (language, codepage)
         # pairs that can be used to retreive string info. We are using only the first pair.
@@ -1193,7 +1171,6 @@ def getFileProperties(fname):
         pass
 
     return props
-
 
 if __name__ == "__main__":
     log_file_name = datetime.datetime.now().strftime('UPK_server_%Y%m%d%H%M%S.log')
@@ -1236,7 +1213,8 @@ if __name__ == "__main__":
     loop.create_task(save_measurements_coroutine(averaged_measurements_buffer_for_disk, file_type='avg'))
 
     # запись неусредненных измерений F1, F2 на диск
-    loop.create_task(save_measurements_coroutine(raw_measurements_buffer_for_disk, file_type='raw'))
+    if save_raw_measurements:
+        loop.create_task(save_measurements_coroutine(raw_measurements_buffer_for_disk, file_type='raw'))
 
     # запись длин волн на диск
     loop.create_task(save_measurements_coroutine(wls_buffer_for_disk, file_type='wls'))
@@ -1258,18 +1236,6 @@ if __name__ == "__main__":
             logging.debug(f'Some error during instrument decsription file reading; exception: {e.__doc__}')
         else:
             logging.info('Loaded instrument description ' + json.dumps(instrument_description))
-
-        # проверка поступившего задания - если оно валидно, то данное соединение будет мастером
-        logging.info("Checking the instrument description...")
-        try:
-            validate_instrument_description(instrument_description)
-        except NameError as e:
-            # wrong instrument description
-            logging.error(e)
-        except ConnectionError as e:
-            # no connection with ITO
-            logging.error(e)
-        else:
-            loop.create_task(instrument_init())
+        loop.create_task(instrument_init())
 
     loop.run_forever()
