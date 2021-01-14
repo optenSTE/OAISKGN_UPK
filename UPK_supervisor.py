@@ -241,9 +241,11 @@ if __name__ == "__main__":
     logging.info(getFileProperties(sys.argv[0]))
 
     # сохранить ini в логе
+    logging.info(f'INI-file {ini_file_name}')
     with open(ini_file_name, 'r') as f:
-        ini_content = f.readlines()
-        logging.info(ini_content)
+        for line in f.readlines():
+            if len(line) > 1:
+                logging.info('\t' + line.strip())
 
     last_dir_check_time = datetime.datetime.now().timestamp()
     last_unconditional_reboot_time = datetime.datetime.now().timestamp()
@@ -304,9 +306,9 @@ if __name__ == "__main__":
 
                 # print(cur_time, last_dir_check_time, time_diff_sec, dir_size_diff_byte, cur_speed_mb_per_h, sep='\t')
 
+                logging.info('Speed, [Mb/h]\t%.3f' % cur_speed_mb_per_h)
                 if 0.0 <= cur_speed_mb_per_h < dir_size_speed_threshold_mb_per_h:
                     # print('Speed %.1fMb/h is too slow' % cur_speed_mb_per_h)
-                    logging.info('Speed %.1fMb/h is too low' % cur_speed_mb_per_h)
 
                     cur_num_of_triggers += 1
                     if cur_num_of_triggers >= num_of_triggers_before_action:
@@ -320,8 +322,6 @@ if __name__ == "__main__":
                         logging.info('Trigger1 released')
                         action_when_trigger_released(ITO_reboot_now)
                         num_of_service_restarts += 1
-                else:
-                    logging.info('Speed %.3fMb/h is ok' % cur_speed_mb_per_h)
 
             sleeping_time = dir_check_interval_sec - (cur_time - last_dir_check_time)
             if sleeping_time < 0 or sleeping_time > dir_check_interval_sec:
