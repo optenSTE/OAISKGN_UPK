@@ -2,59 +2,41 @@
 UPK_supervisor
 Скрипт проверяет появление данных в указанной папке
 Если скорость поступления данных ниже порога, то выполняется перезапуск службы
-
 Также есть второй триггер, который перезапускает службу (без перезагрузки ИТО) с заданным интевалом
 
 ini-файл
-
 ;*********************************
 [main]
 ;*********************************
-
 ; instrument description file, default instrument_description.json
 ; json-file with field 'IP_address' - contains ITO ip address, used to reboot it
 ; should be in %data_dir_path% folder
 instrument_description_filename = instrument_description.json
-
 ; time period needs for ITO rebooting, default 40
 ITO_rebooting_duration_sec = 40
-
 ; pause after stopping the service, default 10
 win_service_restart_pause = 10
-
-
-
 ;*********************************
 [trigger1]
 ;*********************************
-
 ; service name, default OAISKGN_UPK
 service_name = OAISKGN_UPK
-
 ; data folder path, default
 data_dir_path = C:\OAISKGN_UPK\data
-
 ; data files template, default *.txt
 files_template = *.txt
-
 ; minimal data folder size speed when service work normal, default 8
 ; less speed means some problems with the service - it will be restarted
 dir_size_speed_threshold_mb_per_h = 8
-
 ; how often data folder should be checked, default 60
 dir_check_interval_sec = 60
-
 ; how many low speed triggers released before service restarts, default 5
 num_of_triggers_before_action = 5
-
 ; how often ITO should be rebooted (0 - never, 1 - every service restart, 2 - every second service restart and so on), default 2
 num_of_service_restarts_before_ito_reboot = 0
-
-
 ;*********************************
 [trigger2]
 ;*********************************
-
 ; how often service restarts without any other conditions, default 3600
 ; 0 means never
 win_service_restart_interval_sec = 3600
@@ -74,7 +56,7 @@ import socket
 import win32api
 import configparser
 
-program_version = '13012021'
+program_version = '14012021'
 
 # Глобальные переменные
 files_template = '*.txt'  # шаблон имени файла для подсчета размера папки
@@ -258,13 +240,10 @@ if __name__ == "__main__":
     logging.info(f'EXE-file {sys.argv[0]}')
     logging.info(getFileProperties(sys.argv[0]))
 
-
-    # оставим в логе входные параметры
-    logging.info(f'dir_size_speed_threshold_mb_per_h={dir_size_speed_threshold_mb_per_h}, '
-                 f'service_name={service_name}, dir_check_interval_sec={dir_check_interval_sec}, '
-                 f'num_of_triggers_before_action={num_of_triggers_before_action}, '
-                 f'win_service_restart_interval_sec={win_service_restart_interval_sec}, '
-                 f'num_of_service_restarts_before_ito_reboot={num_of_service_restarts_before_ito_reboot} ')
+    # сохранить ini в логе
+    with open(ini_file_name, 'r') as f:
+        ini_content = f.readlines()
+        logging.info(ini_content)
 
     last_dir_check_time = datetime.datetime.now().timestamp()
     last_unconditional_reboot_time = datetime.datetime.now().timestamp()
@@ -300,11 +279,12 @@ if __name__ == "__main__":
         if win_service_restart_interval_sec > 0:
             cur_time = datetime.datetime.now().timestamp()
             if (cur_time - last_unconditional_reboot_time) >= win_service_restart_interval_sec > 0:
-                logging.info('Time-trigger released')
 
                 last_unconditional_reboot_time = cur_time
 
+                logging.info('Trigger2 released')
                 action_when_trigger_released()
+
                 cur_num_of_triggers = 0
                 num_of_service_restarts = 0
 
@@ -337,6 +317,7 @@ if __name__ == "__main__":
                             num_of_service_restarts = 0
                             ITO_reboot_now = True
 
+                        logging.info('Trigger1 released')
                         action_when_trigger_released(ITO_reboot_now)
                         num_of_service_restarts += 1
                 else:
