@@ -20,8 +20,8 @@ hostname = socket.gethostname()
 # address, port = socket.gethostbyname(hostname), 7681  # адрес websocket-сервера
 index_of_reflection = 1.4682
 speed_of_light = 299792458.0
-program_version = '20201225'
-output_measurements_order2 = ['T_degC', 'Fav_N', 'Fbend_N', 'Ice_mm']  # последовательность выдачи данных
+program_version = '25.03.2021'
+output_measurements_order = ['T_degC', 'Fav_N', 'Fbend_N', 'Ice_mm']  # последовательность выдачи данных
 DEFAULT_TIMEOUT = 10000
 instrument_description_filename = 'instrument_description.json'
 
@@ -220,9 +220,13 @@ async def connection_handler(connection, path):
         with open(instrument_description_filename, 'w+') as file:
             json.dump(json_msg, file, ensure_ascii=False, indent=4)
 
+        # let's compare received (json_msg) and existing (instrument_description) descriptions except of some keys
+        excepted_keys = ['DateTime', 'DetectionSettings']
+        b_same_description = {k: v for k, v in json_msg.items() if k not in excepted_keys} == {k: v for k, v in instrument_description.items() if k not in excepted_keys}
+
         # если поступившее задание отличается от имеющегося ранее, то нужно очистить накопленный буфер
         # if json.dumps(instrument_description) != json.dumps(json_msg) and len(averaged_measurements_buffer_for_OSM['data']) > 0:
-        if len(averaged_measurements_buffer_for_OSM['data']) > 0:
+        if len(averaged_measurements_buffer_for_OSM['data']) > 0 and not b_same_description:
             while not averaged_measurements_buffer_for_OSM['is_ready']:
                 await asyncio.sleep(asyncio_pause_sec)
             averaged_measurements_buffer_for_OSM['is_ready'] = False
@@ -230,13 +234,6 @@ async def connection_handler(connection, path):
                 averaged_measurements_buffer_file_name = datetime.datetime.now().strftime('avg_buffer_%Y%m%d%H%S.txt')
                 logging.info(
                     'Received another instrument decsripton - saving averaged_measurements_buffer to ' + averaged_measurements_buffer_file_name)
-                # сначала идет старое задание
-                if 0:
-                    with open(averaged_measurements_buffer_file_name, 'w+') as file:
-                        json.dump(instrument_description, file, ensure_ascii=False, indent=4)
-                        file.write('\n')
-                        for _, measurements in averaged_measurements_buffer_for_OSM['data'].items():
-                            file.write("\t".join([str(x) for x in measurements]) + '\n')
 
                 averaged_measurements_buffer_for_OSM['data'].clear()
             finally:
@@ -249,14 +246,14 @@ async def connection_handler(connection, path):
 
 
 async def instrument_init():
-    global output_measurements_order2, instrument_description, devices, active_channels, x55_measurement_interval_sec, h1, data_averaging_interval_sec, measurements_buffer, peak_stream
+    global output_measurements_order, instrument_description, devices, active_channels, x55_measurement_interval_sec, h1, data_averaging_interval_sec, measurements_buffer, peak_stream
 
     data_averaging_interval_sec = 1.0 / instrument_description['SampleRate']
 
     if instrument_description['version'] == '0.1' or instrument_description['version'] == '0.2':
-        output_measurements_order2 = ['T_degC', 'Fav_N', 'Fbend_N', 'Ice_mm']  # последовательность выдачи данных
+        output_measurements_order = ['T_degC', 'Fav_N', 'Fbend_N', 'Ice_mm']  # последовательность выдачи данных
     elif instrument_description['version'] == '0.3':
-        output_measurements_order2 = ['T_degC', 'Fav_N', 'Fbend_N', 'F1_N', 'F2_N']  # последовательность выдачи данных
+        output_measurements_order = ['T_degC', 'Fav_N', 'Fbend_N', 'F1_N', 'F2_N']  # последовательность выдачи данных
 
     # вытаскиваем информацию об устройствах
     devices = list()
@@ -330,7 +327,7 @@ async def instrument_init():
     df_columns = list()
     df_columns.append('Time')
     for device_num, _ in enumerate(devices):
-        for field in output_measurements_order2:
+        for field in output_measurements_order:
             df_columns.append('Device' + str(device_num) + '_' + field)
 
     measurements_buffer['data'] = pd.DataFrame(columns=df_columns)
@@ -522,10 +519,10 @@ async def wls_to_measurements_coroutine():
 
                     # время усредненного блока, в которое попадает это измерение
                     averaged_block_time = measurement_time - measurement_time % (
-                                1 / instrument_description['SampleRate'])
-                    np.append([averaged_block_time], np.zeros(len(output_measurements_order2)))
+                            1 / instrument_description['SampleRate'])
+                    np.append([averaged_block_time], np.zeros(len(output_measurements_order)))
 
-                    devices_output3 = [measurement_time] + [np.nan] * len(output_measurements_order2) * len(devices)
+                    devices_output3 = [measurement_time] + [np.nan] * len(output_measurements_order) * len(devices)
 
                     raw_measurements_buffer_for_disk['data'][measurement_time] = [measurement_time]
 
@@ -554,17 +551,17 @@ async def wls_to_measurements_coroutine():
                         if wls:
                             device_output = device.get_tension_fav_ex(wls[1], wls[2], wls[0])
 
-                            for field_num, filed in enumerate(output_measurements_order2):
-                                devices_output3[1 + device_num * len(output_measurements_order2) + field_num] = \
-                                device_output[filed]
+                            for field_num, filed in enumerate(output_measurements_order):
+                                devices_output3[1 + device_num * len(output_measurements_order) + field_num] = \
+                                    device_output[filed]
 
                             raw_measurements_buffer_for_disk['data'][measurement_time].append(device_output['F1_N'])
                             raw_measurements_buffer_for_disk['data'][measurement_time].append(device_output['F2_N'])
                         else:
                             none_value = None
-                            for field_num, filed in enumerate(output_measurements_order2):
+                            for field_num, filed in enumerate(output_measurements_order):
                                 devices_output3[
-                                    1 + device_num * len(output_measurements_order2) + field_num] = none_value
+                                    1 + device_num * len(output_measurements_order) + field_num] = none_value
 
                             raw_measurements_buffer_for_disk['data'][measurement_time].append(none_value)
                             raw_measurements_buffer_for_disk['data'][measurement_time].append(none_value)
@@ -662,7 +659,7 @@ async def averaging_measurements_coroutine():
                         t_max = 0
                         ice = 0
 
-                        for field_num, field_name in enumerate(output_measurements_order2):
+                        for field_num, field_name in enumerate(output_measurements_order):
                             field_name = 'Device' + str(device_num) + '_' + field_name
 
                             if field_num == 0:
@@ -1128,9 +1125,9 @@ def getFileProperties(fname):
     https://stackoverflow.com/questions/580924/how-to-access-a-files-properties-on-windows
     """
     propNames = ('Comments', 'InternalName', 'ProductName',
-        'CompanyName', 'LegalCopyright', 'ProductVersion',
-        'FileDescription', 'LegalTrademarks', 'PrivateBuild',
-        'FileVersion', 'OriginalFilename', 'SpecialBuild')
+                 'CompanyName', 'LegalCopyright', 'ProductVersion',
+                 'FileDescription', 'LegalTrademarks', 'PrivateBuild',
+                 'FileVersion', 'OriginalFilename', 'SpecialBuild')
 
     props = {'FixedFileInfo': None, 'StringFileInfo': None, 'FileVersion': None}
 
@@ -1139,8 +1136,8 @@ def getFileProperties(fname):
         fixedInfo = win32api.GetFileVersionInfo(fname, '\\')
         props['FixedFileInfo'] = fixedInfo
         props['FileVersion'] = "%d.%d.%d.%d" % (fixedInfo['FileVersionMS'] / 65536,
-                fixedInfo['FileVersionMS'] % 65536, fixedInfo['FileVersionLS'] / 65536,
-                fixedInfo['FileVersionLS'] % 65536)
+                                                fixedInfo['FileVersionMS'] % 65536, fixedInfo['FileVersionLS'] / 65536,
+                                                fixedInfo['FileVersionLS'] % 65536)
 
         # \VarFileInfo\Translation returns list of available (language, codepage)
         # pairs that can be used to retreive string info. We are using only the first pair.
