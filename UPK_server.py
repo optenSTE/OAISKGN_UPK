@@ -14,13 +14,15 @@ from pathlib import Path
 import statistics
 import re
 import win32api
+import os
+from deepdiff import DeepDiff
 
 # Настроечные переменные
 hostname = socket.gethostname()
 # address, port = socket.gethostbyname(hostname), 7681  # адрес websocket-сервера
 index_of_reflection = 1.4682
 speed_of_light = 299792458.0
-program_version = '25.03.2021'
+program_version = '26.03.2021'
 output_measurements_order = ['T_degC', 'Fav_N', 'Fbend_N', 'Ice_mm']  # последовательность выдачи данных
 DEFAULT_TIMEOUT = 10000
 instrument_description_filename = 'instrument_description.json'
@@ -220,20 +222,24 @@ async def connection_handler(connection, path):
         with open(instrument_description_filename, 'w+') as file:
             json.dump(json_msg, file, ensure_ascii=False, indent=4)
 
+        logging.info('Comparing received (json_msg) and existing (instrument_description) descriptions...')
         # let's compare received (json_msg) and existing (instrument_description) descriptions except of some keys
-        excepted_keys = ['DateTime', 'DetectionSettings']
-        b_same_description = {k: v for k, v in json_msg.items() if k not in excepted_keys} == {k: v for k, v in instrument_description.items() if k not in excepted_keys}
+        # excepted_keys = ['DateTime', 'DetectionSettings']
+        # not_same_description = {k: v for k, v in json_msg.items() if k not in excepted_keys} !=
+        #   {k: v for k, v in instrument_description.items() if k not in excepted_keys}
+        descriptions_diff = DeepDiff(instrument_description, json_msg, ignore_order=True, exclude_paths={"root['DateTime']"})
+        if descriptions_diff:
+            logging.info(f'There are some differences: {descriptions_diff}')
+        else:
+            logging.info('They are the same')
 
         # если поступившее задание отличается от имеющегося ранее, то нужно очистить накопленный буфер
-        # if json.dumps(instrument_description) != json.dumps(json_msg) and len(averaged_measurements_buffer_for_OSM['data']) > 0:
-        if len(averaged_measurements_buffer_for_OSM['data']) > 0 and not b_same_description:
+        if descriptions_diff and len(averaged_measurements_buffer_for_OSM['data']) > 0:
             while not averaged_measurements_buffer_for_OSM['is_ready']:
                 await asyncio.sleep(asyncio_pause_sec)
             averaged_measurements_buffer_for_OSM['is_ready'] = False
             try:
-                averaged_measurements_buffer_file_name = datetime.datetime.now().strftime('avg_buffer_%Y%m%d%H%S.txt')
-                logging.info(
-                    'Received another instrument decsripton - saving averaged_measurements_buffer to ' + averaged_measurements_buffer_file_name)
+                logging.info('Received another instrument desсripton, cleaning averaged_measurements_buffer_for_OSM')
 
                 averaged_measurements_buffer_for_OSM['data'].clear()
             finally:
